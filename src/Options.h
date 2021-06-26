@@ -255,12 +255,12 @@ public:
     unsigned maxReorg = defaultMaxReorg;
 
     // config: txhash_cache
-    /// Corresponds to the number of bytes total we give the txhash caches (lruNum2Hash and lruHeight2TxHashes in Storage.cpp)
-    static constexpr unsigned defaultTxHashCacheBytes = 128'000'000, ///< 128 MB default
-                              txHashCacheBytesMax = 2'000'000'000, ///< 2GB max
-                              txHashCacheBytesMin = 20'000'000; ///< 20 MB minimum
-    static constexpr bool isTxHashCacheBytesInRange(unsigned n) { return n >= txHashCacheBytesMin && n <= txHashCacheBytesMax; }
-    unsigned txHashCacheBytes = defaultTxHashCacheBytes;
+    /// Corresponds to the number of bytes total we give the txhash caches (lruNum2Hash and lruHeight2TxIds in Storage.cpp)
+    static constexpr unsigned defaultTxIdCacheBytes = 128'000'000, ///< 128 MB default
+                              txIdCacheBytesMax = 2'000'000'000, ///< 2GB max
+                              txIdCacheBytesMin = 20'000'000; ///< 20 MB minimum
+    static constexpr bool isTxIdCacheBytesInRange(unsigned n) { return n >= txIdCacheBytesMin && n <= txIdCacheBytesMax; }
+    unsigned txIdCacheBytes = defaultTxIdCacheBytes;
 
     // CLI: --compact-dbs
     /// If specified, we compact all of the databases on startup

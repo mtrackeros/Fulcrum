@@ -669,19 +669,19 @@ void DSProofSubsMgr::expireSubsNotInMempool()
     }
 }
 
-auto DSProofSubsMgr::getFullStatus(const HashX &txHash) const -> SubStatus
+auto DSProofSubsMgr::getFullStatus(const HashX &txId) const -> SubStatus
 {
     auto [mempool, lock] = storage->mempool();
-    if (auto *dsproof = mempool.dsps.bestProofForTx(txHash))
+    if (auto *dsproof = mempool.dsps.bestProofForTx(txId))
         return *dsproof;
     return DSProof{}; // a SubStatus with a .isEmpty() indicates no proof for this txhash
 }
 
 TransactionSubsMgr::~TransactionSubsMgr() {}
 
-SubStatus TransactionSubsMgr::getFullStatus(const HashX &txHash) const
+SubStatus TransactionSubsMgr::getFullStatus(const HashX &txId) const
 {
-    return storage->getTxHeight(txHash);
+    return storage->getTxHeight(txId);
 }
 
 #ifdef ENABLE_TESTS

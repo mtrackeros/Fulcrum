@@ -28,7 +28,7 @@
 #include <set>
 #include <unordered_set>
 
-/* static */ const TxHash PreProcessedBlock::nullhash;
+/* static */ const TxId PreProcessedBlock::nullhash;
 
 /// fill this struct's data with all the txdata, etc from a bitcoin CBlock. Alternative to using the second c'tor.
 void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bitcoin::CBlock &b) {
@@ -39,9 +39,9 @@ void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bi
     header = b.GetBlockHeader();
     estimatedThisSizeBytes = sizeof(*this) + size_t(BTC::GetBlockHeaderSize());
     txInfos.reserve(b.vtx.size());
-    std::unordered_map<TxHash, unsigned, HashHasher> txHashToIndex; // since we know the size ahead of time here, we can set max_load_factor to 1.0 and avoid over-allocating the hash table
-    txHashToIndex.max_load_factor(1.0);
-    txHashToIndex.reserve(b.vtx.size());
+    std::unordered_map<TxId, unsigned, HashHasher> txIdToIndex; // since we know the size ahead of time here, we can set max_load_factor to 1.0 and avoid over-allocating the hash table
+    txIdToIndex.max_load_factor(1.0);
+    txIdToIndex.reserve(b.vtx.size());
 
     // run through all tx's, build inputs and outputs lists
     size_t txIdx = 0;
@@ -49,10 +49,11 @@ void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bi
         // copy tx hash data for the tx
         TxInfo info;
         info.hash = BTC::Hash2ByteArrayRev(tx->GetHashRef());
+        info.id = BTC::Hash2ByteArrayRev(tx->GetIdRef());
         info.nInputs = IONum(tx->vin.size());
         info.nOutputs = IONum(tx->vout.size());
         // remember the tx hash -> index association for use later in this function
-        txHashToIndex[info.hash] = unsigned(txIdx); // cheap copy + cheap hash func. should make this fast.
+        txIdToIndex[info.id] = unsigned(txIdx); // cheap copy + cheap hash func. should make this fast.
 
         // process outputs for this tx
         if (!tx->vout.empty())
@@ -92,7 +93,7 @@ void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bi
             // This should never happen -- outN larger than 16.7 million
             throw InternalError(QString("Block %1 tx %2 has outN larger than %3 (%4). This should never happen."
                                         " Please contact the developers and report this issue.")
-                                .arg(height).arg(QString(info.hash.toHex())).arg(IONumMax).arg(outN));
+                                .arg(height).arg(QString(info.id.toHex())).arg(IONumMax).arg(outN));
         }
 
         // process inputs
@@ -119,10 +120,10 @@ void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bi
             // This should never happen -- outN larger than 16.7 million
             throw InternalError(QString("Block %1 tx %2 has input prevoutN larger than %3 (%4). This should never happen."
                                         " Please contact the developers and report this issue.")
-                                .arg(height).arg(QString(info.hash.toHex())).arg(IONumMax).arg(maxIONumSeen));
+                                .arg(height).arg(QString(info.id.toHex())).arg(IONumMax).arg(maxIONumSeen));
         }
 
-        estimatedThisSizeBytes += sizeof(info) + size_t(info.hash.size());
+        estimatedThisSizeBytes += sizeof(info) + size_t(info.id.size());
         txInfos.emplace_back(std::move(info));
         ++txIdx;
     }
@@ -137,17 +138,17 @@ void PreProcessedBlock::fill(BlockHeight blockHeight, size_t blockSize, const bi
     // QByteArray data.
     size_t inIdx = 0;
     for (auto & inp : inputs) {
-        if (const auto it = txHashToIndex.find(inp.prevoutHash); it != txHashToIndex.end()) {
+        if (const auto it = txIdToIndex.find(inp.prevoutTxId); it != txIdToIndex.end()) {
             // this input refers to a tx in this block!
             const auto prevTxIdx = it->second;
             assert(prevTxIdx < txInfos.size() && prevTxIdx < b.vtx.size());
             const TxInfo & prevInfo = txInfos[prevTxIdx];
-            inp.prevoutHash = prevInfo.hash; //<--- ensure shallow copy that points to same underlying data (saves memory)
+            inp.prevoutTxId = prevInfo.id; //<--- ensure shallow copy that points to same underlying data (saves memory)
             if (prevInfo.output0Index.has_value())
                 inp.parentTxOutIdx.emplace( *prevInfo.output0Index + inp.prevoutN ); // save the index into the `outputs` array where the parent tx to this spend occurred
             else
                 throw InternalError(QString("Unexpected state: prevInfo has no output0Index for txid: %1 in block %2")
-                                    .arg(QString(prevInfo.hash.toHex())).arg(height));
+                                    .arg(QString(prevInfo.id.toHex())).arg(height));
             auto & outp = outputs[ inp.parentTxOutIdx.value() ];
             outp.spentInInputIndex.emplace( inIdx ); // mark the output as spent by this index
             const auto & prevTx = b.vtx[prevTxIdx];
@@ -189,7 +190,7 @@ QString PreProcessedBlock::toDebugString() const
     {
         QTextStream ts(&ret, QIODevice::ReadOnly|QIODevice::Truncate|QIODevice::Text);
         ts << "<PreProcessedBlock --"
-           << " height: " << height << " " << " size: " << sizeBytes << " header_nTime: " << header.nTime << " hash: " << header.GetHash().ToString().c_str()
+           << " height: " << height << " " << " size: " << sizeBytes << " header_nTime: " << header.GetBlockTime() << " hash: " << header.GetHash().ToString().c_str()
            << " nTx: " << txInfos.size() << " nIns: " << inputs.size() << " nOuts: " << outputs.size() << " nScriptHash: " << hashXAggregated.size();
         int i = 0;
         for (const auto & [hashX, ag] : hashXAggregated) {
@@ -197,13 +198,13 @@ QString PreProcessedBlock::toDebugString() const
             for (size_t j = 0; j < ag.ins.size(); ++j) {
                 const auto idx = ag.ins[j];
                 const auto & theInput [[maybe_unused]] = inputs[idx];
-                assert(theInput.parentTxOutIdx.has_value() && txHashForOutputIdx(*theInput.parentTxOutIdx) == theInput.prevoutHash);
-                ts << " {in# " << j << " - " << inputs[idx].prevoutHash.toHex() << ":" << inputs[idx].prevoutN
-                   << ", spent in " << txHashForInputIdx(idx).toHex() << ":" << numForInputIdx(idx).value_or(999999) << " }";
+                assert(theInput.parentTxOutIdx.has_value() && txIdForOutputIdx(*theInput.parentTxOutIdx) == theInput.prevoutTxId);
+                ts << " {in# " << j << " - " << inputs[idx].prevoutTxId.toHex() << ":" << inputs[idx].prevoutN
+                   << ", spent in " << txIdForInputIdx(idx).toHex() << ":" << numForInputIdx(idx).value_or(999999) << " }";
             }
             for (size_t j = 0; j < ag.outs.size(); ++j) {
                 const auto idx = ag.outs[j];
-                ts << " {out# " << j << " - " << txHashForOutputIdx(idx).toHex() << ":" << outputs[idx].outN << " amt: " << outputs[idx].amount.ToString().c_str() << " }";
+                ts << " {out# " << j << " - " << txIdForOutputIdx(idx).toHex() << ":" << outputs[idx].outN << " amt: " << outputs[idx].amount.ToString().c_str() << " }";
             }
             ts << ")";
             ++i;

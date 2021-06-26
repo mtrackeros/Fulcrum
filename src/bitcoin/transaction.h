@@ -51,8 +51,7 @@ private:
     uint32_t n;
 
 public:
-    COutPoint() : txid(), n(-1) {}
-    COutPoint(uint256 txidIn, uint32_t nIn) : txid(TxId(txidIn)), n(nIn) {}
+    static constexpr uint32_t NULL_INDEX = std::numeric_limits<uint32_t>::max();
 
     ADD_SERIALIZE_METHODS
 
@@ -62,7 +61,10 @@ public:
         READWRITE(n);
     }
 
-    bool IsNull() const { return txid.IsNull() && n == uint32_t(-1); }
+    COutPoint() : txid(), n(NULL_INDEX) {}
+    COutPoint(TxId txidIn, uint32_t nIn) : txid(txidIn), n(nIn) {}
+
+    bool IsNull() const { return txid.IsNull() && n == NULL_INDEX; }
 
     const TxId &GetTxId() const { return txid; }
     uint32_t GetN() const { return n; }
@@ -363,9 +365,11 @@ public:
 private:
     /** Memory only. */
     const uint256 hash;
+    const uint256 id;
 
     uint256 ComputeHash() const;
     uint256 ComputeWitnessHash() const;
+    uint256 ComputeId() const;
 
 public:
     /** Construct a CTransaction that qualifies as IsNull() */
@@ -390,12 +394,12 @@ public:
 
     bool IsNull() const { return vin.empty() && vout.empty(); }
 
-    const TxId GetId() const { return TxId(hash); }
-    const TxHash GetHash() const { return TxHash(hash); }
+    const TxId GetId() const { return TxId(id); }
+    const TxId GetHash() const { return TxId(hash); }
+
     /// added by Calin to avoid extra copying
     const uint256 &GetHashRef() const { return hash; }
-    /// Added by Calin -- to support Core. Not cached, computed on-the-fly (this is not the case in Core code)
-    const TxHash GetWitnessHash() const { return TxHash{ComputeWitnessHash()}; }
+    const uint256 &GetIdRef() const { return id; }
 
     // Return sum of txouts.
     Amount GetValueOut() const;
@@ -472,8 +476,8 @@ public:
      * a cached result.
      */
     TxId GetId() const;
-    TxHash GetHash() const;
-    TxHash GetWitnessHash() const; ///< Added by Calin to support Core
+    TxId GetHash() const;
+    TxId GetWitnessHash() const; ///< Added by Calin to support Core
 
     friend bool operator==(const CMutableTransaction &a,
                            const CMutableTransaction &b) {

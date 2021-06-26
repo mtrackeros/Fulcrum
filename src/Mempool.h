@@ -45,7 +45,7 @@ struct Mempool
     /// This info, with the exception of `hashXs` comes from bitcoind via the "getrawmempool false" RPC call.
     struct Tx
     {
-        TxHash hash; ///< in reverse bitcoind order (ready for hex encode), fixed value.
+        TxId txid; ///< in reverse bitcoind order (ready for hex encode), fixed value.
 
         bitcoin::Amount fee{bitcoin::Amount::zero()}; ///< we calculate this fee ourselves since in the past I noticed we get a funny value sometimes that's off by 1 or 2 sats --  which I suspect is due limitations of doubles, perhaps?
         unsigned sizeBytes = 0;
@@ -91,20 +91,20 @@ struct Mempool
             const uint8_t nParentMe    =   hasUnconfirmedParentTx ? 1 : 0,
                           nParentOther = o.hasUnconfirmedParentTx ? 1 : 0;
             // always sort the unconf. parent tx's *after* the regular (confirmed parent-only) tx's.
-            return std::tie(nParentMe, hash) < std::tie(nParentOther, o.hash);
+            return std::tie(nParentMe, txid) < std::tie(nParentOther, o.txid);
         }
 
         bool operator==(const Tx &o) const noexcept {
-            return     std::tie(  hash,   sizeBytes,   fee,   hasUnconfirmedParentTx,   txos,   hashXs)
-                    == std::tie(o.hash, o.sizeBytes, o.fee, o.hasUnconfirmedParentTx, o.txos, o.hashXs);
+            return     std::tie(  txid,   sizeBytes,   fee,   hasUnconfirmedParentTx,   txos,   hashXs)
+                    == std::tie(o.txid, o.sizeBytes, o.fee, o.hasUnconfirmedParentTx, o.txos, o.hashXs);
         }
         bool operator!=(const Tx &o) const noexcept { return !(*this == o); }
 
     };
 
     using TxRef = std::shared_ptr<Tx>;
-    /// master mapping of TxHash -> TxRef
-    using TxMap = std::unordered_map<TxHash, TxRef, HashHasher>;
+    /// master mapping of TxId -> TxRef
+    using TxMap = std::unordered_map<TxId, TxRef, HashHasher>;
     /// ensures an ordering of TxRefs for the set below that are from fewest ancestors -> most ancestors
     struct TxRefOrdering {
         bool operator()(const TxRef &a, const TxRef &b) const {
@@ -133,20 +133,20 @@ struct Mempool
     // -- Add to mempool
 
     /// Used by addNewTxs
-    using NewTxsMap = std::unordered_map<TxHash, std::pair<Mempool::TxRef, bitcoin::CTransactionRef>, HashHasher>;
+    using NewTxsMap = std::unordered_map<TxId, std::pair<Mempool::TxRef, bitcoin::CTransactionRef>, HashHasher>;
     /// The scriptHashes that were affected by this refresh/synch cycle. Used for notifications.
     using ScriptHashesAffectedSet = std::unordered_set<HashX, HashHasher>;
     /// DB getter -- called to retrieve a utxo's scripthash & amount data from the DB. May throw.
     using GetTXOInfoFromDBFunc = std::function<std::optional<TXOInfo>(const TXO &)>;
 
-    using TxHashSet = std::unordered_set<TxHash, HashHasher>; ///< Used below by Stats & dropTxs()
+    using TxIdSet = std::unordered_set<TxId, HashHasher>; ///< Used below by Stats & dropTxs()
 
     /// Results of add or drop -- some statistics for caller.
     struct Stats {
         std::size_t oldSize = 0, newSize = 0;
         std::size_t oldNumAddresses = 0, newNumAddresses = 0;
         std::size_t dspRmCt = 0, dspTxRmCt = 0; // dsp stats: number of dsproofs removed, number of dsp <-> tx links removed (dropTxs, confirmedInBlock updates these)
-        TxHashSet dspTxsAffected; // populated by addNewTxs(), dropTxs(), & confirmedInBlock() -- used ultimately bu DSProofSubsMgr to notify linked txs.
+        TxIdSet dspTxsAffected; // populated by addNewTxs(), dropTxs(), & confirmedInBlock() -- used ultimately bu DSProofSubsMgr to notify linked txs.
         double elapsedMsec = 0.;
     };
 
@@ -179,21 +179,21 @@ struct Mempool
     ///
     /// This function modifies its `txids` argument to expand it to the set of all descendants of txids as well.
     /// (The caller may use this information to know precisely which txids are now gone).
-    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, TxHashSet & txids, bool TRACE = false,
+    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, TxIdSet & txids, bool TRACE = false,
                   std::optional<float> rehashMaxLoadFactor = {});
 
-    /// Convenient alias for the above function which accepts a TxHashSet && temporary.
-    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, TxHashSet && txids, bool TRACE = false,
+    /// Convenient alias for the above function which accepts a TxIdSet && temporary.
+    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, TxIdSet && txids, bool TRACE = false,
                   std::optional<float> rehashMaxLoadFactor = {}) {
         return dropTxs(scriptHashesAffected, txids, TRACE, rehashMaxLoadFactor);
     }
-    /// Convenient alias for the above function which accepts a const TxHashSet & instead. (But does incur the cost of a copy).
-    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, const TxHashSet & txids, bool TRACE = false,
+    /// Convenient alias for the above function which accepts a const TxIdSet & instead. (But does incur the cost of a copy).
+    Stats dropTxs(ScriptHashesAffectedSet & scriptHashesAffected, const TxIdSet & txids, bool TRACE = false,
                   std::optional<float> rehashMaxLoadFactor = {}) {
-        return dropTxs(scriptHashesAffected, TxHashSet{txids}, TRACE, rehashMaxLoadFactor);
+        return dropTxs(scriptHashesAffected, TxIdSet{txids}, TRACE, rehashMaxLoadFactor);
     }
 
-    using TxHashNumMap = std::unordered_map<TxHash, TxNum, HashHasher>; ///< Used below by confirmedInBlock()
+    using TxIdNumMap = std::unordered_map<TxId, TxNum, HashHasher>; ///< Used below by confirmedInBlock()
 
     /// Called by Storage::addBlock -- removes the txids in question, and also reassigns any txs spending them to
     /// "confirmed spends".
@@ -201,7 +201,7 @@ struct Mempool
     /// Note this is like dropTxs but doesn't drop child txs, just reassigns their spends. *Only* call this during
     /// block processing when you know for a fact that the txids in `txids` are now confirmed!
     Stats confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffected,
-                           const TxHashNumMap & txidMap, BlockHeight confirmedHeight,
+                           const TxIdNumMap & txidMap, BlockHeight confirmedHeight,
                            bool TRACE = false, std::optional<float> rehashMaxLoadFactor = {});
 
     // -- Fee histogram support (used by mempool.get_fee_histogram RPC) --
@@ -232,23 +232,23 @@ private:
     /// Given a set of txids in this Mempool, grow the set to encompass all descendant tx's that spend
     /// from the initial set.  Will keep iterating until it cannot grow the set any longer.
     /// dropTxs() implicitly calls this.
-    std::size_t growTxHashSetToIncludeDescendants(TxHashSet &txids, bool TRACE = false) const;
+    std::size_t growTxIdSetToIncludeDescendants(TxIdSet &txids, bool TRACE = false) const;
 
     /// Actual implementation of same-named function
-    std::size_t growTxHashSetToIncludeDescendants(const char *const logprefix, TxHashSet &txids, bool TRACE) const;
+    std::size_t growTxIdSetToIncludeDescendants(const char *const logprefix, TxIdSet &txids, bool TRACE) const;
 
     /// Internal use; called by dropTxs and confirmedInBlock to do some book-keeping; returns number of txs removed.
     template <typename SetLike>
-    std::enable_if_t<std::is_same_v<SetLike, TxHashSet> || std::is_same_v<SetLike, TxHashNumMap>, std::size_t>
+    std::enable_if_t<std::is_same_v<SetLike, TxIdSet> || std::is_same_v<SetLike, TxIdNumMap>, std::size_t>
     /*std::size_t*/ rmTxsInHashXTxs_impl(const SetLike &txids, const ScriptHashesAffectedSet &scriptHashesAffected,
                                          bool TRACE, const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort);
 
-    /// Convenient alias for above, accepts a TxHashSet as first-arg
-    std::size_t rmTxsInHashXTxs(const TxHashSet &txids, const ScriptHashesAffectedSet &scriptHashesAffected, bool TRACE,
+    /// Convenient alias for above, accepts a TxIdSet as first-arg
+    std::size_t rmTxsInHashXTxs(const TxIdSet &txids, const ScriptHashesAffectedSet &scriptHashesAffected, bool TRACE,
                                 const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort = {});
 
-    /// Convenient alias for above, accepts a TxHashNumMap as first-arg
-    std::size_t rmTxsInHashXTxs(const TxHashNumMap &txidMap, const ScriptHashesAffectedSet &scriptHashesAffected,
+    /// Convenient alias for above, accepts a TxIdNumMap as first-arg
+    std::size_t rmTxsInHashXTxs(const TxIdNumMap &txidMap, const ScriptHashesAffectedSet &scriptHashesAffected,
                                 bool TRACE, const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort = {});
 
     /// Internal: called by dump()

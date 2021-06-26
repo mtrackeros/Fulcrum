@@ -1685,8 +1685,8 @@ void Server::rpc_blockchain_transaction_get(Client *c, const RPC::Message &m)
 {
     QVariantList l = m.paramsList();
     assert(l.size() <= 2);
-    QByteArray txHash = validateHashHex( l.front().toString() );
-    if (txHash.length() != HashLen)
+    QByteArray txId = validateHashHex( l.front().toString() );
+    if (txId.length() != HashLen)
         throw RPCError("Invalid tx hash");
     bool verbose = false;
     if (l.size() == 2) {
@@ -1695,7 +1695,7 @@ void Server::rpc_blockchain_transaction_get(Client *c, const RPC::Message &m)
             throw RPCError("Invalid verbose argument; expected boolean");
         verbose = verbArg;
     }
-    generic_async_to_bitcoind(c, m.id, "getrawtransaction", QVariantList{ Util::ToHexFast(txHash), verbose },
+    generic_async_to_bitcoind(c, m.id, "getrawtransaction", QVariantList{ Util::ToHexFast(txId), verbose },
         // use the default success func, which just echoes the bitcoind reply to the client
         BitcoinDSuccessFunc(),
         // error func, throw an RPCError
@@ -1710,15 +1710,15 @@ void Server::rpc_blockchain_transaction_get(Client *c, const RPC::Message &m)
 }
 
 namespace {
-    /// Note: pos must be within the txHashes array, otherwise a BadArgs exception will be thrown.
-    /// Input txHashes should be in bitcoind memory order.
+    /// Note: pos must be within the txIds array, otherwise a BadArgs exception will be thrown.
+    /// Input txIds should be in bitcoind memory order.
     /// Output is a QVariantList already reversed and hex encoded, suitable for putting into the results map as 'merkle'.
     /// Used by the below two _id_from_pos and _get_merkle rpc methods.
-    QVariantList getMerkleForTxHashes(const std::vector<QByteArray> & txHashes, unsigned pos) {
+    QVariantList getMerkleForTxIds(const std::vector<QByteArray> & txIds, unsigned pos) {
         QVariantList branchList;
 
         // next, compute the branch and root for the tx hashes which are now in bitcoind memory order
-        auto pair = Merkle::branchAndRoot(txHashes, pos);
+        auto pair = Merkle::branchAndRoot(txIds, pos);
         auto & [branch, root] = pair;
 
         // now, build our results for json as a QVariantList, reversing the memory back to hex memory order, and hex encoding it.
@@ -1737,11 +1737,11 @@ void Server::rpc_blockchain_transaction_get_height(Client *c, const RPC::Message
 {
     QVariantList l = m.paramsList();
     assert(l.size() == 1);
-    QByteArray txHash = validateHashHex( l.front().toString() );
-    if (txHash.length() != HashLen)
+    QByteArray txId = validateHashHex( l.front().toString() );
+    if (txId.length() != HashLen)
         throw RPCError("Invalid tx hash");
-    generic_do_async(c, m.id, [txHash, this] {
-        const auto optHeight = storage->getTxHeight(txHash);
+    generic_do_async(c, m.id, [txId, this] {
+        const auto optHeight = storage->getTxHeight(txId);
         if (!optHeight)
             throw RPCError("No transaction matching the requested hash was found");
         return qlonglong(*optHeight);
@@ -1752,25 +1752,25 @@ void Server::rpc_blockchain_transaction_get_merkle(Client *c, const RPC::Message
 {
     QVariantList l = m.paramsList();
     assert(l.size() >= 1 && l.size() <= 2);
-    QByteArray txHash = validateHashHex( l.front().toString() );
-    if (txHash.length() != HashLen)
+    QByteArray txId = validateHashHex( l.front().toString() );
+    if (txId.length() != HashLen)
         throw RPCError("Invalid tx hash");
     bool ok = true;
     std::optional<BlockHeight> optHeight;
     if (l.size() == 2) optHeight = l.back().toUInt(&ok); // they specified a height
     if (!ok || (optHeight && *optHeight >= Storage::MAX_HEADERS))
         throw RPCError("Invalid height argument; expected non-negative numeric value");
-    generic_do_async(c, m.id, [txHash, optHeight, this] () mutable {
-        if (!optHeight) optHeight = storage->getTxHeight(txHash); // if no height specified, grab it from tx hash index
+    generic_do_async(c, m.id, [txId, optHeight, this] () mutable {
+        if (!optHeight) optHeight = storage->getTxHeight(txId); // if no height specified, grab it from tx hash index
         if (!optHeight || !*optHeight)
             throw RPCError("No confirmed transaction matching the requested hash was found");
         const auto height = *optHeight;
-        auto txHashes = storage->txHashesForBlockInBitcoindMemoryOrder(height);
-        std::reverse(txHash.begin(), txHash.end()); // we need to compare to bitcoind memory order so reverse specified hash
+        auto txIds = storage->txIdsForBlockInBitcoindMemoryOrder(height);
+        std::reverse(txId.begin(), txId.end()); // we need to compare to bitcoind memory order so reverse specified hash
         constexpr unsigned NO_POS = ~0U;
         unsigned pos = NO_POS;
-        for (unsigned i = 0; i < txHashes.size(); ++i) {
-            if (txHashes[i] == txHash) {
+        for (unsigned i = 0; i < txIds.size(); ++i) {
+            if (txIds[i] == txId) {
                 pos = i;
                 break;
             }
@@ -1778,7 +1778,7 @@ void Server::rpc_blockchain_transaction_get_merkle(Client *c, const RPC::Message
         if (pos == NO_POS)
             throw RPCError(QString("No transaction matching the requested hash found at height %1").arg(height));
 
-        const auto branchList = getMerkleForTxHashes(txHashes, pos);
+        const auto branchList = getMerkleForTxIds(txIds, pos);
 
         QVariantMap resp = {
             { "block_height" , height },
@@ -1815,19 +1815,19 @@ void Server::rpc_blockchain_transaction_id_from_pos(Client *c, const RPC::Messag
         if (merkle) {
             // merkle=true is a dict, see: https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-transaction-id-from-pos
             // get all hashes for the block (we need them for merkle)
-            auto txHashes = storage->txHashesForBlockInBitcoindMemoryOrder(height);
-            if (pos >= txHashes.size()) {
+            auto txIds = storage->txIdsForBlockInBitcoindMemoryOrder(height);
+            if (pos >= txIds.size()) {
                 // out of range, or block not found
                 throw RPCError(missingErr.arg(pos).arg(height));
             }
             // save the requested tx_hash now, which we will return as tx_hash of the response dictionary
             // (we need to reverse it for outputting to hex since we received it in bitcoind internal memory order).
-            const QByteArray txHashHex = Util::ToHexFast(Util::reversedCopy(txHashes[pos]));
+            const QByteArray txIdHex = Util::ToHexFast(Util::reversedCopy(txIds[pos]));
 
-            const auto branchList = getMerkleForTxHashes(txHashes, pos);
+            const auto branchList = getMerkleForTxIds(txIds, pos);
 
             QVariantMap res = {
-                { "tx_hash" , txHashHex },
+                { "tx_hash" , txIdHex },
                 { "merkle" , branchList },
             };
 
@@ -1837,8 +1837,8 @@ void Server::rpc_blockchain_transaction_id_from_pos(Client *c, const RPC::Messag
             const auto opt = storage->hashForHeightAndPos(height, pos);
             if (!opt.has_value() || opt->length() != HashLen)
                 throw RPCError(missingErr.arg(pos).arg(height));
-            const auto txHashHex = Util::ToHexFast(opt.value());
-            return QVariant(txHashHex);
+            const auto txIdHex = Util::ToHexFast(opt.value());
+            return QVariant(txIdHex);
         }
     });
 }
@@ -1874,7 +1874,7 @@ void Server::rpc_blockchain_transaction_dsproof_list(Client *c, const RPC::Messa
     if (isBTC || !bitcoindmgr->hasDSProofRPC())
         throw RPCError("This server lacks dsproof support", RPC::ErrorCodes::Code_MethodNotFound);
     generic_do_async(c, m.id, [this] {
-        DSProof::TxHashSet allDescendants;
+        DSProof::TxIdSet allDescendants;
         {
             auto [mempool, lock] = storage->mempool(); // shared lock
             const auto &dsps = mempool.dsps.getAll();
@@ -1909,8 +1909,8 @@ void Server::rpc_blockchain_utxo_get_info(Client *c, const RPC::Message &m)
     QVariantList l = m.paramsList();
     assert(l.size() == 2);
 
-    QByteArray txHash = validateHashHex( l.front().toString() ); // arg0: prevoutHash
-    if (txHash.length() != HashLen)
+    QByteArray txId = validateHashHex( l.front().toString() ); // arg0: prevoutHash
+    if (txId.length() != HashLen)
         throw RPCError("Invalid tx hash");
     static_assert(std::is_unsigned_v<IONum>); // compile-time paranoia
     constexpr auto outNMax = std::numeric_limits<IONum>::max();
@@ -1918,7 +1918,7 @@ void Server::rpc_blockchain_utxo_get_info(Client *c, const RPC::Message &m)
     const unsigned outN = l.back().toUInt(&ok); // arg1: prevoutN
     if (!ok || outN > outNMax)
         throw RPCError(QString("Invalid tx out number: expected a value >= 0 and <= %1").arg(qlonglong(outNMax)));
-    const TXO txo{txHash, IONum(outN)};
+    const TXO txo{txId, IONum(outN)};
     generic_do_async(c, m.id, [txo, this] {
         QVariant ret;
         if (auto optInfo = storage->utxoGet(txo); optInfo.has_value() && optInfo->isValid()) {

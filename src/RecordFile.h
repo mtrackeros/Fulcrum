@@ -33,7 +33,7 @@
 
 /// A low-level class for reading/writing fixed-sized records indexed by an index number.  Basically, this is a
 /// file-backed array.  We do it this way to save some space in the DB when the key is just a sequential index
-/// and there is no sense in storing it.  Used by Storage for the TxNum -> TxHash map, for instance.
+/// and there is no sense in storing it.  Used by Storage for the TxNum -> TxId map, for instance.
 class RecordFile
 {
 public:

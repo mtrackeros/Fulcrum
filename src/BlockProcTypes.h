@@ -35,6 +35,7 @@ using IONum = std::uint32_t;
 inline constexpr IONum IONum16Max = std::numeric_limits<std::uint16_t>::max(); ///< IONums beyond this value get serialized as 3 bytes
 inline constexpr IONum IONumMax = (IONum(0x1) << 24) - 1; ///< support up to 24-bit IONum
 inline constexpr TxNum TxNumMax = (TxNum(0x1) << 48) - 1; ///< support up to 48-bit TxNum
+using TxId = QByteArray;
 using TxHash = QByteArray;
 using HashX = QByteArray; ///< Note that despite the name, unlike in ElectrumX/ElectronX, our "HashX" is always the full 32-byte sha256 hash.
 using BlockHash = QByteArray;

@@ -52,7 +52,10 @@ struct PreProcessedBlock
     bitcoin::CBlockHeader header;
 
     struct TxInfo {
-        TxHash hash; ///< 32 byte txid. These txid's are *reversed* from bitcoind's internal memory order. (so as to be closer to the final hex encoded format).
+        ///< 32 byte txid. These txid's are *reversed* from bitcoind's internal memory order. (so as to be closer to the final hex encoded format).
+        TxId id;
+        ///< 32 byte txid. These txid's are *reversed* from bitcoind's internal memory order. (so as to be closer to the final hex encoded format).
+        TxId hash;
         IONum nInputs = 0, nOutputs = 0; ///< the number of inputs and outputs in the tx -- all tx's are guaranteed to have <= ~111k inputs or outputs currently and for the foreseeable future. If that changes, fixme.
         std::optional<unsigned> input0Index, output0Index; ///< if either of these have a value, they point into the `inputs` and `outputs` arrays below, respectively
     };
@@ -69,7 +72,7 @@ struct PreProcessedBlock
 
     struct InputPt {
         unsigned txIdx = 0; ///< index into the `txInfos` vector above for the tx where this input appears
-        TxHash prevoutHash; ///< 32-byte prevoutHash.  In *reversed* memory order (hex-encoding ready!) (May be a shallow copy of a byte array in `txInfos` if the prevout tx was in this block.). May be empty if coinbase
+        TxId prevoutTxId; ///< 32-byte prevoutHash.  In *reversed* memory order (hex-encoding ready!) (May be a shallow copy of a byte array in `txInfos` if the prevout tx was in this block.). May be empty if coinbase
         IONum prevoutN = 0; ///< the index in the prevout tx for this input (again, tx's can't have more than ~111k inputs -- if that changes, fixme!)
         std::optional<unsigned> parentTxOutIdx; ///< if the input's prevout was in this block, the index into the `outputs` array declared in BlockProcBase, otherwise undefined.
     };
@@ -117,11 +120,11 @@ struct PreProcessedBlock
 
     // misc helpers --
 
-    /// returns the txHash given an index into the `outputs` array (or a null QByteArray if index is out of range).
-    const TxHash &txHashForOutputIdx(unsigned outputIdx) const {
+    /// returns the txId given an index into the `outputs` array (or a null QByteArray if index is out of range).
+    const TxId &txIdForOutputIdx(unsigned outputIdx) const {
         if (outputIdx < outputs.size()) {
             if (const auto txIdx = outputs[outputIdx].txIdx; txIdx < txInfos.size())
-                return txInfos[txIdx].hash;
+                return txInfos[txIdx].id;
         }
         return nullhash;
     }
@@ -149,11 +152,11 @@ struct PreProcessedBlock
         }
         return ret;
     }
-    /// returns the txHash given an index into the `inputs` array (or a null QByteArray if index is out of range).
-    const TxHash &txHashForInputIdx(unsigned inputIdx) const {
+    /// returns the txId given an index into the `inputs` array (or a null QByteArray if index is out of range).
+    const TxId &txIdForInputIdx(unsigned inputIdx) const {
         if (inputIdx < inputs.size()) {
             if (const auto txIdx = inputs[inputIdx].txIdx; txIdx < txInfos.size())
-                return txInfos[txIdx].hash;
+                return txInfos[txIdx].id;
         }
         return nullhash;
     }
@@ -178,5 +181,5 @@ struct PreProcessedBlock
     std::vector<std::unordered_set<HashX, HashHasher>> hashXsByTx() const;
 
 protected:
-    static const TxHash nullhash;
+    static const TxId nullhash;
 };

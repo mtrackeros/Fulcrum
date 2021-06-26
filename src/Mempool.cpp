@@ -74,10 +74,10 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
     ret.oldSize = this->txs.size();
     ret.oldNumAddresses = this->hashXTxs.size();
     // first, do new outputs for all tx's, and put the new tx's in the mempool struct
-    for (auto & [hash, pair] : txsNew) {
+    for (auto & [txid, pair] : txsNew) {
         auto & [tx, ctx] = pair;
-        assert(hash == tx->hash);
-        this->txs[tx->hash] = tx; // save tx right now to map, since we need to find it later for possible spends, etc if subsequent tx's refer to this tx.
+        assert(txid == tx->txid);
+        this->txs[tx->txid] = tx; // save tx right now to map, since we need to find it later for possible spends, etc if subsequent tx's refer to this tx.
         IONum n = 0;
         const auto numTxo = ctx->vout.size();
         if (LIKELY(tx->txos.size() != numTxo)) {
@@ -117,17 +117,17 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
         // . <-- at this point the .txos vec is built, with everything isValid() except for the OP_RETURN outs, which are all !isValid()
     }
 
-    std::unordered_map<TxHash, TxHashSet, HashHasher> newTxsNewParents; // only used if !dsps.empty(). Contains all in-mempool parents of txs from txsNew that are themselves in txsNew
+    std::unordered_map<TxId, TxIdSet, HashHasher> newTxsNewParents; // only used if !dsps.empty(). Contains all in-mempool parents of txs from txsNew that are themselves in txsNew
 
     // next, do new inputs for all tx's, debiting/crediting either a mempool tx or querying db for the relevant utxo
-    for (auto & [hash, pair] : txsNew) {
+    for (auto & [txid, pair] : txsNew) {
         auto & [tx, ctx] = pair;
-        assert(hash == tx->hash);
+        assert(txid == tx->txid);
         IONum inNum = 0;
-        TxHashSet seenParents; // DSP handling, otherwise unused if no dsp
+        TxIdSet seenParents; // DSP handling, otherwise unused if no dsp
         for (const auto & in : ctx->vin) {
             const IONum prevN = IONum(in.prevout.GetN());
-            const TxHash prevTxId = BTC::Hash2ByteArrayRev(in.prevout.GetTxId());
+            const TxId prevTxId = BTC::Hash2ByteArrayRev(in.prevout.GetTxId());
             const TXO prevTXO{prevTxId, prevN};
             TXOInfo prevInfo;
             QByteArray sh; // shallow copy of prevInfo.hashX
@@ -139,37 +139,37 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
                 if (prevN >= prevTxRef->txos.size()
                         || !(prevInfo = prevTxRef->txos[prevN]).isValid())
                     // defensive programming paranoia
-                    throw InternalError(QString("FAILED TO FIND A VALID PREVIOUS TXOUTN %1:%2 IN MEMPOOL for TxHash: %3 (input %4)")
-                                        .arg(QString(prevTxId.toHex())).arg(prevN).arg(QString(hash.toHex())).arg(inNum));
+                    throw InternalError(QString("FAILED TO FIND A VALID PREVIOUS TXOUTN %1:%2 IN MEMPOOL for TxId: %3 (input %4)")
+                                        .arg(QString(prevTxId.toHex())).arg(prevN).arg(QString(txid.toHex())).arg(inNum));
                 sh = prevInfo.hashX;
                 tx->hashXs[sh].unconfirmedSpends[prevTXO] = prevInfo;
                 auto prevHashXIt = prevTxRef->hashXs.find(sh);
                 if (prevHashXIt == prevTxRef->hashXs.end())
                     throw InternalError(QString("PREV OUT %1 IS MISSING ITS HASHX ENTRY FOR HASHX %2 (txid: %3)")
-                                        .arg(prevTXO.toString(), QString(sh.toHex()), QString(tx->hash.toHex())));
+                                        .arg(prevTXO.toString(), QString(sh.toHex()), QString(tx->txid.toHex())));
                 prevHashXIt->second.utxo.erase(prevN); // remove this spend from utxo set for prevTx in mempool
-                if (TRACE) Debug() << hash.toHex() << " unconfirmed spend: " << prevTXO.toString() << " " << prevInfo.amount.ToString().c_str();
+                if (TRACE) Debug() << txid.toHex() << " unconfirmed spend: " << prevTXO.toString() << " " << prevInfo.amount.ToString().c_str();
 
                 // DSP handling (BCH only)
                 if (!dsps.empty() && !seenParents.count(prevTxId)) {
                     if (!txsNew.count(prevTxId)) { // parent was an old in-mempool tx, check if it had dsps and assign them to this child
                         if (const auto *dspHashes = dsps.dspHashesForTx(prevTxId)) {
                             for (const auto &dspHash : *dspHashes) {
-                                if (dsps.addTx(dspHash, hash)) {
-                                    ret.dspTxsAffected.insert(hash);
-                                    DebugM(__func__, ": added tx ", hash.toHex(), " to descendants for dsp ", dspHash.toHex());
+                                if (dsps.addTx(dspHash, txid)) {
+                                    ret.dspTxsAffected.insert(txid);
+                                    DebugM(__func__, ": added tx ", txid.toHex(), " to descendants for dsp ", dspHash.toHex());
                                 } else {
                                     // should never happen -- this is a new txid! It should have no associations to existing dsps...
                                     // (invariant is maintained in SynchDSPsTask that only "known" txids are ever added)
                                     Warning() << __func__ << ": dsp addTx returned false for dspHash: " << dspHash.toHex()
-                                              << ", txid: " << hash.toHex() << ". FIXME!";
+                                              << ", txid: " << txid.toHex() << ". FIXME!";
                                 }
                             }
                         }
                     } else {
                         // parent was a tx in the new set, so we must process further at end of function to figure
                         // out if this childtx has associated dsps...
-                        newTxsNewParents[hash].insert(prevTxId);
+                        newTxsNewParents[txid].insert(prevTxId);
                     }
                     seenParents.insert(prevTxId);
                 }
@@ -182,8 +182,8 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
                     // (or there maybe was a race condition and a new block came in while we were doing this).
                     // We will throw if missing, and the synch process aborts and hopefully we recover with a reorg
                     // or a new block or somesuch.
-                    throw InternalError(QString("FAILED TO FIND PREVIOUS TX %1 IN EITHER MEMPOOL OR DB for TxHash: %2 (input %3)")
-                                        .arg(prevTXO.toString()).arg(QString(hash.toHex())).arg(inNum));
+                    throw InternalError(QString("FAILED TO FIND PREVIOUS TX %1 IN EITHER MEMPOOL OR DB for TxId: %2 (input %3)")
+                                        .arg(prevTXO.toString()).arg(QString(txid.toHex())).arg(inNum));
                 }
                 prevInfo = *optTXOInfo;
                 sh = prevInfo.hashX;
@@ -199,7 +199,7 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
                 }
                 // end memory saving hack
                 hxit->second.confirmedSpends[prevTXO] = prevInfo;
-                if (TRACE) Debug() << hash.toHex() << " confirmed spend: " << prevTXO.toString() << " " << prevInfo.amount.ToString().c_str();
+                if (TRACE) Debug() << txid.toHex() << " confirmed spend: " << prevTXO.toString() << " " << prevInfo.amount.ToString().c_str();
             }
             tx->fee += prevInfo.amount;
             assert(sh == prevInfo.hashX);
@@ -269,7 +269,7 @@ auto Mempool::addNewTxs(ScriptHashesAffectedSet & scriptHashesAffected,
     return ret;
 }
 
-std::size_t Mempool::growTxHashSetToIncludeDescendants(const char *const logpfx, TxHashSet &txids, const bool TRACE) const
+std::size_t Mempool::growTxIdSetToIncludeDescendants(const char *const logpfx, TxIdSet &txids, const bool TRACE) const
 {
     if (txids.empty())
         return 0;
@@ -288,7 +288,7 @@ std::size_t Mempool::growTxHashSetToIncludeDescendants(const char *const logpfx,
                 continue; // no unconf. parents or already added
             for (const auto & [sh, ioinfo] : tx->hashXs) {
                 for (const auto & [txo, txoinfo] : ioinfo.unconfirmedSpends) {
-                    if (txids.count(txo.txHash)) {
+                    if (txids.count(txo.txId)) {
                         // this spends one of the ones in our set! add it since it's a child of something we want to remove.
                         txids.insert(txid);
                         ++added;
@@ -311,19 +311,19 @@ std::size_t Mempool::growTxHashSetToIncludeDescendants(const char *const logpfx,
     return added;
 }
 
-std::size_t Mempool::growTxHashSetToIncludeDescendants(TxHashSet &txids, const bool TRACE) const
+std::size_t Mempool::growTxIdSetToIncludeDescendants(TxIdSet &txids, const bool TRACE) const
 {
-    return growTxHashSetToIncludeDescendants("txDescendants", txids, TRACE);
+    return growTxIdSetToIncludeDescendants("txDescendants", txids, TRACE);
 }
 
-auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxHashSet & txids, bool TRACE,
+auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxIdSet & txids, bool TRACE,
                       std::optional<float> rehashMaxLoadFactor) -> Stats
 {
     const auto t0 = Tic();
     // also drop txs that spend from the txids in the above set as well -- since we
     // cannot drop tx's in the middle of a chain of spends due to the inconsistency
     // that would lead to (possible spends of non-existant outputs).
-    growTxHashSetToIncludeDescendants("dropTxs", txids, TRACE);
+    growTxIdSetToIncludeDescendants("dropTxs", txids, TRACE);
 
     Stats ret;
     ScriptHashesAffectedSet scriptHashesAffected;
@@ -349,24 +349,24 @@ auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxHashS
             // for the parent tx hashx entry
             for (const auto & [txo, txoinfo] : ioinfo.unconfirmedSpends) {
                 assert(txoinfo.hashX == hashX);
-                if (txids.count(txo.txHash)) {
+                if (txids.count(txo.txId)) {
                     // prev tx will be (or has already been) removed, no sense in doing any utxo crediting for a tx
                     // that will disappear shortly
                     ++skipPrevCt;
                     continue;
                 }
-                auto prevIt = txs.find(txo.txHash);
+                auto prevIt = txs.find(txo.txId);
                 if (LIKELY(prevIt != txs.end())) {
                     auto & prevTx = prevIt->second;
                     if (LIKELY(txo.outN < prevTx->txos.size())) {
                         auto & prevTxoInfo = prevTx->txos[txo.outN];
                         if (UNLIKELY(txoinfo != prevTxoInfo)) {
-                            Error() << "dropTxs: Previous out " << txo.txHash.toHex() << ":" << txo.outN << " -- "
+                            Error() << "dropTxs: Previous out " << txo.txId.toHex() << ":" << txo.outN << " -- "
                                     << "expected TXOInfo for this tx to match with spending tx " << txid.toHex()
                                     << "'s TXOInfo! FIXME!";
                         }
                         if (UNLIKELY(prevTxoInfo.hashX != hashX)) {
-                            Error() << "dropTxs: Previous out " << txo.txHash.toHex() << ":" << txo.outN << " -- "
+                            Error() << "dropTxs: Previous out " << txo.txId.toHex() << ":" << txo.outN << " -- "
                                     << "expected TXOInfo for this tx to have hashX " << hashX.toHex()
                                     << ", but it did not! FIXME!";
                         }
@@ -378,19 +378,19 @@ auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxHashS
                             previoinfo.utxo.insert(txo.outN);
                             if (TRACE)
                                 Debug() << "dropTxs: for txid " << Util::ToHexFast(txid) << " crediting "
-                                        << txo.txHash.toHex() << ":" << txo.outN << " amount "
+                                        << txo.txId.toHex() << ":" << txo.outN << " amount "
                                         << QString::fromStdString(txoinfo.amount.ToString()) << " back to hashX "
                                         << Util::ToHexFast(hashX);
                         } else {
-                            Error() << "dropTxs: Previous out " << txo.txHash.toHex() << ":" << txo.outN << " -- "
+                            Error() << "dropTxs: Previous out " << txo.txId.toHex() << ":" << txo.outN << " -- "
                                     << "cannot find hashX " << hashX.toHex() << " in tx map! FIXME!";
                         }
                     } else {
-                        Error() << "dropTxs: Previous out " << txo.txHash.toHex() << ":" << txo.outN << " is "
+                        Error() << "dropTxs: Previous out " << txo.txId.toHex() << ":" << txo.outN << " is "
                                 << " invalid (this output is spent by the dropped tx " << txid.toHex() << ")! FIXME!";
                     }
                 } else {
-                    Error() << "dropTxs: Previous tx " << txo.txHash.toHex() << " which has outputs spent by "
+                    Error() << "dropTxs: Previous tx " << txo.txId.toHex() << " which has outputs spent by "
                             << "(dropped) tx " << txid.toHex() << " is not found in mempool! This is unexpected! FIXME!";
                 }
             }
@@ -412,7 +412,7 @@ auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxHashS
     if (!dsps.empty()) { // fast path for common case of no dsproofs in most mempools, or for BTC mempools where the dsproof feature does not exist
         const Tic trm;
         const auto b4 = dsps.size(), txb4 = dsps.numTxDspLinks();
-        TxHashSet txids2rm;
+        TxIdSet txids2rm;
         for (const auto & txid : txids) {
             if (dsps.dspHashesForTx(txid)) // <-- this is O(1) fast lookup by txid
                 txids2rm.insert(txid); // enqueue for removal in next loop below (must do this after growing the dsps.dspHashesForTx set)
@@ -454,7 +454,7 @@ auto Mempool::dropTxs(ScriptHashesAffectedSet & scriptHashesAffectedOut, TxHashS
 }
 
 template <typename SetLike>
-std::enable_if_t<std::is_same_v<SetLike, Mempool::TxHashSet> || std::is_same_v<SetLike, Mempool::TxHashNumMap>, std::size_t>
+std::enable_if_t<std::is_same_v<SetLike, Mempool::TxIdSet> || std::is_same_v<SetLike, Mempool::TxIdNumMap>, std::size_t>
 /*std::size_t*/
 Mempool::rmTxsInHashXTxs_impl(const SetLike &txids, const ScriptHashesAffectedSet &scriptHashesAffected,
                               bool TRACE, const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort)
@@ -477,7 +477,7 @@ Mempool::rmTxsInHashXTxs_impl(const SetLike &txids, const ScriptHashesAffectedSe
         newvec.reserve(txvec.size());
         for (auto &txref : txvec) {
             // filter out txids in the set
-            if (txids.count(txref->hash) == 0)
+            if (txids.count(txref->txid) == 0)
                 // not in txid set; copy it to newvec
                 newvec.push_back(txref);
             else
@@ -513,20 +513,20 @@ Mempool::rmTxsInHashXTxs_impl(const SetLike &txids, const ScriptHashesAffectedSe
     return ct;
 }
 
-std::size_t Mempool::rmTxsInHashXTxs(const TxHashSet &txids, const ScriptHashesAffectedSet &scriptHashesAffected,
+std::size_t Mempool::rmTxsInHashXTxs(const TxIdSet &txids, const ScriptHashesAffectedSet &scriptHashesAffected,
                                      const bool TRACE, const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort)
 {
     return rmTxsInHashXTxs_impl(txids, scriptHashesAffected, TRACE, hashXsNeedingSort);
 }
 
-std::size_t Mempool::rmTxsInHashXTxs(const TxHashNumMap &txidMap, const ScriptHashesAffectedSet &scriptHashesAffected,
+std::size_t Mempool::rmTxsInHashXTxs(const TxIdNumMap &txidMap, const ScriptHashesAffectedSet &scriptHashesAffected,
                                      bool TRACE, const std::optional<ScriptHashesAffectedSet> &hashXsNeedingSort)
 {
     return rmTxsInHashXTxs_impl(txidMap, scriptHashesAffected, TRACE, hashXsNeedingSort);
 }
 
 auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut,
-                               const TxHashNumMap & txidMap, const BlockHeight confirmedHeight,
+                               const TxIdNumMap & txidMap, const BlockHeight confirmedHeight,
                                bool TRACE, std::optional<float> rehashMaxLoadFactor) -> Stats
 {
     const auto t0 = Tic();
@@ -539,7 +539,7 @@ auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut
     ret.oldNumAddresses = this->hashXTxs.size();
     const std::size_t dspCtBefore = dsps.size();
     const std::size_t dspTxCtBefore = dsps.numTxDspLinks();
-    TxHashSet dspTxids;
+    TxIdSet dspTxids;
 
     // iterate through all txs in mempool
     for (auto itTxs = txs.begin(); itTxs != txs.end(); /* may delete during iteration, see below */) {
@@ -567,7 +567,7 @@ auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut
                 int ctr = 0;
                 for (auto itUS = ioinfo.unconfirmedSpends.begin(); itUS != ioinfo.unconfirmedSpends.end(); /* see below */) {
                     const auto & [txo, xx] = *itUS; // take ref for readability (pointers/refs are not invalidated, even after extract)
-                    if (const auto itTxMap = txidMap.find(txo.txHash); itTxMap != txidMap.end()) {
+                    if (const auto itTxMap = txidMap.find(txo.txId); itTxMap != txidMap.end()) {
                         // and voila! This tx spends from one of the tx's we are going to remove. Recategorize unconf -> conf.
                         auto it2move = itUS++;  // first make `it` point to `it` + 1, making `it2move` be previous value `it`
                         // transfer node from unconfirmed spends -> confirmed spends
@@ -580,11 +580,11 @@ auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut
                             ++ctr;
                             if (TRACE)
                                 DebugM("confirmedInBlock: TXO ", txo.toString(), " now recategorized under ",
-                                       "\"confirmedSpends\" for txid ", tx->hash.toHex());
+                                       "\"confirmedSpends\" for txid ", tx->txid.toHex());
                         } else {
                             // this should never happen
                             Error() << "confirmedInBlock: TXO " << txo.toString() << " could not be inserted into "
-                                    << "\"confirmedSpends\" for txid: " << tx->hash.toHex() << ". This should never "
+                                    << "\"confirmedSpends\" for txid: " << tx->txid.toHex() << ". This should never "
                                     << "happen! FIXME!";
                         }
                     } else
@@ -595,7 +595,7 @@ auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut
                 // (this unconf spends map for this sh may have gone from N -> N-1, or N -> N-2, etc, or may now be empty)
                 nUnconfs += ioinfo.unconfirmedSpends.size();
                 if (ctr && TRACE)
-                    DebugM("confirmedInBlock: txid ", tx->hash.toHex(), ", scripthash ", sh.toHex(), " removed ", ctr,
+                    DebugM("confirmedInBlock: txid ", tx->txid.toHex(), ", scripthash ", sh.toHex(), " removed ", ctr,
                            " unconf spends (unconf map size for this txid+sh now: ", ioinfo.unconfirmedSpends.size(), ")");
             }
             // check if no more unconf spends now for this tx; if so, reset flag & notify all sh's for this tx
@@ -613,7 +613,7 @@ auto Mempool::confirmedInBlock(ScriptHashesAffectedSet & scriptHashesAffectedOut
                     hashXTxsEntriesNeedingSort->insert(sh);
                 }
                 if (TRACE)
-                    DebugM("confirmedInBlock: txid ", tx->hash.toHex(), " now recategorized as not spending any unconfirmed parents");
+                    DebugM("confirmedInBlock: txid ", tx->txid.toHex(), " now recategorized as not spending any unconfirmed parents");
             }
         }
         ++itTxs; // in this branch: nothing removed, keep iterating
@@ -657,7 +657,7 @@ QVariantMap Mempool::dumpTx(const TxRef &tx)
 {
     QVariantMap m;
     if (tx) {
-        m["hash"] = tx->hash.toHex();
+        m["hash"] = tx->txid.toHex();
         m["sizeBytes"] = tx->sizeBytes;
         m["fee"] = tx->fee.ToString().c_str();
         m["hasUnconfirmedParentTx"] = tx->hasUnconfirmedParentTx;
@@ -732,7 +732,7 @@ QVariantMap Mempool::dump() const
     for (const auto & [sh, txset] : hashXTxs) {
         QVariantList l;
         for (const auto & tx : txset)
-            if (tx) l.push_back(tx->hash.toHex());
+            if (tx) l.push_back(tx->txid.toHex());
         hxs[sh.toHex()] = l;
     }
     mp["hashXTxs"] = hxs;
@@ -863,7 +863,7 @@ namespace {
                     isSegWit = true;
 
                 auto rtx = std::make_shared<Mempool::Tx>();
-                rtx->hash = BTC::Hash2ByteArrayRev(ctx->GetHashRef());
+                rtx->txid = BTC::Hash2ByteArrayRev(ctx->GetIdRef());
                 dataTotal += rtx->sizeBytes = ctx->GetTotalSize(true);
                 ret.emplace(std::piecewise_construct,
                             std::forward_as_tuple(rtx->hash),
@@ -878,21 +878,21 @@ namespace {
 
     // given a set of root txids, adds all the txids for every tx involved in the full descendant and sibling dag
     // of `txidsIn`
-    Mempool::TxHashSet makeFullPackages(const Mempool &pool, const Mempool::TxHashSet &txidsIn)
+    Mempool::TxIdSet makeFullPackages(const Mempool &pool, const Mempool::TxIdSet &txidsIn)
     {
         auto txids = txidsIn;
-        std::function<Mempool::TxHashSet(const TxHash &)> getDescendants;
+        std::function<Mempool::TxIdSet(const TxId &)> getDescendants;
         // returns all the descendant tx's given a txid. includes txid itself in the resultant set.
-        getDescendants = [&pool, &getDescendants](const TxHash &txid) {
+        getDescendants = [&pool, &getDescendants](const TxId &txid) {
             // This is slow.. TODO: make faster
-            Mempool::TxHashSet ret;
+            Mempool::TxIdSet ret;
             ret.insert(txid);
             for (const auto &[txhash, tx] : pool.txs) {
                 if (!tx->hasUnconfirmedParentTx || ret.count(txhash))
                     continue; // skip tx's with no unconf parents, skip tx's we've already seen (including self)
                 for (const auto &[sh, ioinfo] : tx->hashXs) {
                     for (const auto &[txo, txoinfo] : ioinfo.unconfirmedSpends) {
-                        if (txo.txHash == txid) {
+                        if (txo.txId == txid) {
                             // this spends our target txid, recurse
                             ret.merge(getDescendants(txhash));
                             goto continue_outer;
@@ -913,8 +913,8 @@ namespace {
                 if (!tx->hasUnconfirmedParentTx) continue;
                 for (const auto &[sh, ioinfo] : tx->hashXs) {
                     for (const auto &[txo, txoinfo] : ioinfo.unconfirmedSpends) {
-                        if (!txids.count(txo.txHash)) {
-                            txids.merge(getDescendants(txo.txHash)); // modify txids set
+                        if (!txids.count(txo.txId)) {
+                            txids.merge(getDescendants(txo.txId)); // modify txids set
                             goto start; // keep retrying, ever expanding the set until it encompasses all
                         }
                     }
@@ -962,19 +962,19 @@ namespace {
 
         for (const auto iterMode : iterModes) { // try all modes
 
-            Mempool::TxHashNumMap txNumMap;
+            Mempool::TxIdNumMap txNumMap;
             const BlockHeight confirmedHeightStart = 2 + QRandomGenerator::global()->generate() % 1'000'000; // random blockHeight for conf
             std::unordered_set<BlockHeight> okConfHeights; okConfHeights.insert(confirmedHeightStart);
             std::unordered_map<TXO, TXOInfo> confirmedTXOInfos;
             TxNum txNumLast = 0;
             BlockHeight confirmedHeightCur = confirmedHeightStart;
 
-            auto getTxNum = [&txNumLast, &txNumMap](const TxHash &txHash, bool create) -> std::optional<TxNum> {
-                auto it = txNumMap.find(txHash);
+            auto getTxNum = [&txNumLast, &txNumMap](const TxId &txId, bool create) -> std::optional<TxNum> {
+                auto it = txNumMap.find(txId);
                 if (it == txNumMap.end()) {
                     if (!create)
                         return std::nullopt;
-                    it = txNumMap.emplace(txHash, ++txNumLast).first;
+                    it = txNumMap.emplace(txId, ++txNumLast).first;
                 }
                 return it->second;
             };
@@ -996,7 +996,7 @@ namespace {
                 const bitcoin::CScriptNum scriptNum{int64_t(1 + std::hash<TXO>{}(txo) % NAddressTarget)};
                 ret.hashX = BTC::HashXFromCScript(bitcoin::CScript() << scriptNum);
                 //ret.hashX = BTC::HashXFromCScript(bitcoin::CScript() << Util::toVec<std::vector<uint8_t>>(txo.toBytes(false)));
-                ret.txNum = *getTxNum(txo.txHash, true);
+                ret.txNum = *getTxNum(txo.txId, true);
                 // cache
                 confirmedTXOInfos.emplace(txo, ret);
                 return ret;
@@ -1045,10 +1045,10 @@ namespace {
                 bool dumped = false;
                 // iterate each time, dropping leaves from mempool
                 for (int iterCt = 1; !mempool.txs.empty(); ++iterCt) {
-                    Mempool::TxHashSet txids;
-                    Mempool::TxHashNumMap txidMap;
+                    Mempool::TxIdSet txids;
+                    Mempool::TxIdNumMap txidMap;
                     if (iterMode == DropOnlyLeaves) {
-                        for (const auto & [txHash, tx] : mempool.txs) {
+                        for (const auto & [txId, tx] : mempool.txs) {
                             std::unordered_set<IONum> ionums;
                             for (const auto & [hashX, ioinfo] : tx->hashXs) {
                                 for (const auto & n : ioinfo.utxo)
@@ -1060,14 +1060,14 @@ namespace {
                                 validSize += txo.isValid();
                             if (ionums.size() == validSize) {
                                 // this is a leaf
-                                txids.insert(txHash);
+                                txids.insert(txId);
                             }
                         }
                     } else if (iterMode == ConfirmOnlyRoots || iterMode == ConfirmPackages) {
-                        for (const auto & [txHash, tx] : mempool.txs) {
+                        for (const auto & [txId, tx] : mempool.txs) {
                             if (!tx->hasUnconfirmedParentTx) {
                                 // no unconf parent -- eligible this iteration!
-                                txids.insert(txHash);
+                                txids.insert(txId);
                             }
                         }
                     } else {
@@ -1144,7 +1144,7 @@ namespace {
                                     const bool isnew = expected.unconfUtxos.emplace(txo, txoinfo).second;
                                     if (!isnew) throw Exception(QString("Non-unique utxo encountered %1! FIXME!").arg(txo.toString()));
                                     expected.unconfUtxoValue += txoinfo.amount;
-                                    auto it = mempool.txs.find(txo.txHash);
+                                    auto it = mempool.txs.find(txo.txId);
                                     if (it == mempool.txs.end())
                                         throw Exception(QString("Could not find prev out %1 for unconfirmed spend for txid %2")
                                                         .arg(txo.toString(), QString(txid.toHex())));
@@ -1204,7 +1204,7 @@ namespace {
                             /*if (iterMode == ConfirmPackages) {
                                 for (const auto & [sh, ioinfo] : tx->hashXs) {
                                     for (const auto & [txo, txoinfo] : ioinfo.unconfirmedSpends) {
-                                        if (!txidMap.count(txo.txHash))
+                                        if (!txidMap.count(txo.txId))
                                             throw Exception(QString("Unexpected: txid %1 spends unconfirmed parent txo "
                                                                     "%2 which is not in the confirm set!")
                                                             .arg(QString(txid.toHex()), txo.toString()));
@@ -1260,7 +1260,7 @@ namespace {
                             for (const auto & [sh, ioinfo] : tx->hashXs) {
                                 nUnconf += ioinfo.unconfirmedSpends.size();
                                 for (const auto & [txo, txoinfo] : ioinfo.unconfirmedSpends) {
-                                    if (!mempool.txs.count(txo.txHash))
+                                    if (!mempool.txs.count(txo.txId))
                                         throw Exception("A scripthash now refers to an unconfirmed spend that no longer exists");
                                     if (txoinfo.confirmedHeight)
                                         throw Exception("An unconfirmed spend has a confirmedHeight");
@@ -1269,15 +1269,15 @@ namespace {
                                 }
                                 // check sanity of confirmedSpends
                                 for (const auto & [txo, txoinfo] : ioinfo.confirmedSpends) {
-                                    if (mempool.txs.count(txo.txHash))
+                                    if (mempool.txs.count(txo.txId))
                                         throw Exception("A scripthash now refers to a \"confirmed spend\" that is still in mempool");
                                     if (!txoinfo.confirmedHeight.has_value())
                                         throw Exception("A \"confirmed spend\" has no confirmedHeight");
                                     if (!okConfHeights.count(*txoinfo.confirmedHeight))
                                         throw Exception("A \"confirmed spend\" has unexpected/junk confirmedHeight");
-                                    if (auto optNum = getTxNum(txo.txHash, false); !optNum || *optNum != txoinfo.txNum)
+                                    if (auto optNum = getTxNum(txo.txId, false); !optNum || *optNum != txoinfo.txNum)
                                         throw Exception("A \"confirmed spend\" has invalid txNum");
-                                    if (const auto it = txidMap.find(txo.txHash);
+                                    if (const auto it = txidMap.find(txo.txId);
                                             it != txidMap.end() && txoinfo.txNum != it->second)
                                         throw Exception("A \"confirmed spend\" has unexpected txNum");
                                 }
@@ -1287,9 +1287,9 @@ namespace {
                         }
                         // check that hashXTxs doesn't refer to anything that has been removed and that hashXTxs
                         // order is correct
-                        std::set<TxHash> setInVecs;
+                        std::set<TxId> setInVecs;
                         for (const auto & [sh, txvec] : mempool.hashXTxs) {
-                            std::set<TxHash> setInVecsThisSh;
+                            std::set<TxId> setInVecsThisSh;
                             const Mempool::TxRef *pprev = nullptr;
                             for (const auto & tx : txvec) {
                                 if (!tx)

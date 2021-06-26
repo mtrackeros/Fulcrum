@@ -81,7 +81,7 @@ protected:
     void updateTS() { tsMsec = Util::getTime(); }
 
 signals:
-    /// @param key is the subscription key (ScriptHash or TxHash) (raw 32 bytes).
+    /// @param key is the subscription key (ScriptHash or TxId) (raw 32 bytes).
     /// @param status is raw 32 bytes as well if the manager is ScriptHashSubsMgr, otherwise it is whatever is
     ///     specified for that SubsMgr  (e.g. if DSProofSubsMgr, then it's a DSProof object).
     void statusChanged(const HashX &key, const SubStatus &status);
@@ -277,11 +277,11 @@ public:
 
     /// Thread-safe. Returns a SubStatus object which .has_value() and where .dsproof() is not nullptr.
     /// Will return an object with a dsproof which is not isComplete() (default constructed) if there are no dsproofs
-    /// for the given txHash.
+    /// for the given txId.
     ///
     /// Note that this implicitly will take the Storage "mempool lock" as a shared lock -- so bear that in mind if
     /// calling this from `Storage` with that lock already held.
-    SubStatus getFullStatus(const HashX &txHash) const override;
+    SubStatus getFullStatus(const HashX &txId) const override;
     /// Identical to superclass implementation but it also attaches the unsubscribeRequested() signal to a lambda
     /// for client, so that SubsMgr::unsubscribeClientsForKeys() is not a no-op.
     ///
@@ -314,5 +314,5 @@ public:
     /// is not known. Otherwise the **blockHeight() will be a height where 0=mempool and >0=confirmed_height.
     ///
     /// Note that this implicitly will take some of the Storage locks: blocksLock, blkInfoLock, and mempoolLock.
-    SubStatus getFullStatus(const HashX &txHash) const override;
+    SubStatus getFullStatus(const HashX &txId) const override;
 };

@@ -51,7 +51,7 @@ private:
 
     State state = GetDSPList;
 
-    Mempool::TxHashSet txsAffected;
+    Mempool::TxIdSet txsAffected;
     DSPs::DspMap dspsNeedingDownload, dspsDownloaded;
     unsigned dspDlsExpected = 0;
     DSPs::DspHashSet downloadsFailed;

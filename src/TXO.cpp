@@ -23,7 +23,7 @@
 QString TXO::toString() const
 {
     return isValid()
-            ? QStringLiteral("%1:%2").arg(QString(txHash.toHex())).arg(outN)
+            ? QStringLiteral("%1:%2").arg(QString(txId.toHex())).arg(outN)
             : QStringLiteral("<txo_invalid>");
 }
 

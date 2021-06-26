@@ -41,14 +41,14 @@ bool DSPs::add(DSProof && dspIn)
 {
     if (!dspIn.hash.isValid())
         throw BadArgs("Bad dsp hash");
-    if (dspIn.txHash.size() != HashLen || !dspIn.descendants.count(dspIn.txHash))
-        throw BadArgs("Expected dsp txHash to be valid and in its own descendant set");
+    if (dspIn.txId.size() != HashLen || !dspIn.descendants.count(dspIn.txId))
+        throw BadArgs("Expected dsp txId to be valid and in its own descendant set");
     auto [it, inserted] = dsproofs.emplace(DspHash(dspIn.hash), std::move(dspIn));
     if (!inserted)
         return false;
     const auto &dsp = it->second;
-    for (const auto & txHash : dsp.descendants)
-        txDspsMap[txHash].insert(dsp.hash);
+    for (const auto & txId : dsp.descendants)
+        txDspsMap[txId].insert(dsp.hash);
     return true;
 }
 DSProof * DSPs::getMutable(const DspHash &hash) // private
@@ -65,8 +65,8 @@ std::size_t DSPs::rm(const DspHash &hash)
     auto & dsp = it->second;
     // erase all links from tx -> dsp
     std::size_t ret{};
-    for (const auto &txHash : dsp.descendants) {
-        auto it2 = txDspsMap.find(txHash);
+    for (const auto &txId : dsp.descendants) {
+        auto it2 = txDspsMap.find(txId);
         if (it2 == txDspsMap.end()) continue; // may happen if we are called from rmTx()
         it2->second.erase(hash);
         if (it2->second.empty())
@@ -77,14 +77,14 @@ std::size_t DSPs::rm(const DspHash &hash)
     dsproofs.erase(it);
     return ret;
 }
-bool DSPs::addTx(const DspHash &dspHash, const TxHash &txHash)
+bool DSPs::addTx(const DspHash &dspHash, const TxId &txId)
 {
     DSProof *dsp;
-    if (txHash.size() != HashLen || !(dsp = getMutable(dspHash)))
+    if (txId.size() != HashLen || !(dsp = getMutable(dspHash)))
         return false;
     int ct = 0;
-    ct += txDspsMap[txHash].insert(dsp->hash).second;
-    ct += dsp->descendants.insert(txHash).second; // this is how calling code adds new descendants it learns about
+    ct += txDspsMap[txId].insert(dsp->hash).second;
+    ct += dsp->descendants.insert(txId).second; // this is how calling code adds new descendants it learns about
     if (UNLIKELY(ct == 1))
         // this indicates a bug in this code -- invariant not maintained
         Warning() << "DSPs::addTx -- bug in code. Invariant violated: the associations in txDspsMap and dsp->descendants disagree!";
@@ -93,9 +93,9 @@ bool DSPs::addTx(const DspHash &dspHash, const TxHash &txHash)
     // false otherwise.  See Mempool::addNewTxs if you change the semantics of this return value.
     return ct > 0;
 }
-std::size_t DSPs::rmTx(const TxHash &txHash)
+std::size_t DSPs::rmTx(const TxId &txId)
 {
-    auto it = txDspsMap.find(txHash);
+    auto it = txDspsMap.find(txId);
     if (it == txDspsMap.end()) return 0;
     const DspHashSet dspHashes{std::move(it->second)};
     txDspsMap.erase(it);
@@ -105,34 +105,34 @@ std::size_t DSPs::rmTx(const TxHash &txHash)
         auto *dsp = getMutable(dspHash);
         if (!dsp) {
             // this should never happen
-            Error() << "FIXME: missing dsp " << dspHash.toHex() << " for tx " << txHash.toHex();
+            Error() << "FIXME: missing dsp " << dspHash.toHex() << " for tx " << txId.toHex();
             continue;
         }
-        if (dsp->txHash == txHash) {
-            // master tx gone! Remove this dsproof, and all the links to its descendants
+        if (dsp->txId == txId) {
+            // master tx txId! Remove this dsproof, and all the links to its descendants
             rm(dsp->hash); // will invalidate pointer `dsp`
         } else {
             // descendant tx, erase from set
-            if (!dsp->descendants.erase(txHash))
+            if (!dsp->descendants.erase(txId))
                 // this should never happen
-                Error() << "FIXME: dsp " << dspHash.toHex() << " missing tx " << txHash.toHex() << " in its descendants list";
+                Error() << "FIXME: dsp " << dspHash.toHex() << " missing tx " << txId.toHex() << " in its descendants list";
         }
         ++ret;
     }
     return ret;
 }
 
-auto DSPs::dspHashesForTx(const TxHash &txHash) const -> const DspHashSet *
+auto DSPs::dspHashesForTx(const TxId &txId) const -> const DspHashSet *
 {
-    if (auto it = txDspsMap.find(txHash); it != txDspsMap.end())
+    if (auto it = txDspsMap.find(txId); it != txDspsMap.end())
         return &it->second;
     return nullptr;
 }
 
-std::vector<const DSProof *> DSPs::proofsLinkedToTx(const TxHash &txHash) const
+std::vector<const DSProof *> DSPs::proofsLinkedToTx(const TxId &txId) const
 {
     std::vector<const DSProof *> ret;
-    auto *dspHashes = dspHashesForTx(txHash);
+    auto *dspHashes = dspHashesForTx(txId);
     if (!dspHashes) return ret;
     ret.reserve(dspHashes->size());
     for (const auto &hash : *dspHashes)
@@ -141,12 +141,12 @@ std::vector<const DSProof *> DSPs::proofsLinkedToTx(const TxHash &txHash) const
     return ret;
 }
 
-const DSProof * DSPs::bestProofForTx(const TxHash &txHash) const
+const DSProof * DSPs::bestProofForTx(const TxId &txId) const
 {
     const DSProof *ret{};
     std::size_t bestSize = std::numeric_limits<std::size_t>::max();
-    for (auto *dsp : proofsLinkedToTx(txHash)) {
-        if (dsp->txHash == txHash)
+    for (auto *dsp : proofsLinkedToTx(txId)) {
+        if (dsp->txId == txId)
             return dsp;
         else if (!ret || dsp->descendants.size() < bestSize) {
             bestSize = dsp->descendants.size();
@@ -156,9 +156,9 @@ const DSProof * DSPs::bestProofForTx(const TxHash &txHash) const
     return ret;
 }
 
-DSProof::TxHashSet DSPs::txsLinkedToTxs(const DSProof::TxHashSet &txids) const
+DSProof::TxIdSet DSPs::txsLinkedToTxs(const DSProof::TxIdSet &txids) const
 {
-    DSProof::TxHashSet ret;
+    DSProof::TxIdSet ret;
     DspHashSet linkedDspHashes;
     // for each txid in txids, get the linked dsp hashes
     linkedDspHashes.reserve(txids.size() * 2); // reserve heuristic: est. on avg no more than 2 dsps per txid
@@ -182,11 +182,11 @@ QVariantMap DSProof::toVarMap() const
     ret["hex"] = Util::ToHexFast(serializedProof);
     if (txo.isValid()) {
         QVariantMap outpoint;
-        outpoint["txid"] = Util::ToHexFast(txo.txHash);
+        outpoint["txid"] = Util::ToHexFast(txo.txId);
         outpoint["vout"] = quint32(txo.outN);
         ret["outpoint"] = outpoint;
     }
-    ret["txid"] = Util::ToHexFast(txHash);
+    ret["txid"] = Util::ToHexFast(txId);
     QVariantList l;
     for (const auto &txid : descendants)
         l.append(QString(Util::ToHexFast(txid)));

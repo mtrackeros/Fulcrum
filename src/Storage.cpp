@@ -480,14 +480,14 @@ namespace {
     struct UserInterrupted : public Exception { using Exception::Exception; ~UserInterrupted() override; };
     UserInterrupted::~UserInterrupted() {} // weak vtable warning suppression
 
-    /// Manages the txhash2txnum rocksdb table.  The schema is:
+    /// Manages the txid2txnum rocksdb table.  The schema is:
     /// Key: N bytes from POS position from the big-endian ordered (JSON ordered) txhash (default 6 from the End)
     /// Value: One or more serialized VarInts. Each VarInt represents a "TxNum" (which tells us where the actual hash
-    ///     lives in the txnum2txhash flat file).
+    ///     lives in the txnum2txid flat file).
     ///
     /// This class is mainly a thin wrapper around the rocksdb and RecordFile facilities and they are both
     /// thread-safe and reentrant. It takes no locks itself.
-    class TxHash2TxNumMgr {
+    class TxId2TxNumMgr {
         rocksdb::DB * const db;
         const rocksdb::ReadOptions & rdOpts; // references into Storage::Pvt
         const rocksdb::WriteOptions & wrOpts;
@@ -502,17 +502,17 @@ namespace {
         enum KeyPos : uint8_t { Beginning=0, Middle=1, End=2, KP_Invalid=3 };
         const KeyPos keyPos;
 
-        TxHash2TxNumMgr(rocksdb::DB *db, const rocksdb::ReadOptions & rdOpts, const rocksdb::WriteOptions &wrOpts,
-                     RecordFile *txnum2txhash, size_t keyBytes /*= 6*/, KeyPos keyPos /*= End*/)
-            : db(db), rdOpts(rdOpts), wrOpts(wrOpts), rf(txnum2txhash), keyBytes(keyBytes), keyPos(keyPos)
+        TxId2TxNumMgr(rocksdb::DB *db, const rocksdb::ReadOptions & rdOpts, const rocksdb::WriteOptions &wrOpts,
+                     RecordFile *txnum2txid, size_t keyBytes /*= 6*/, KeyPos keyPos /*= End*/)
+            : db(db), rdOpts(rdOpts), wrOpts(wrOpts), rf(txnum2txid), keyBytes(keyBytes), keyPos(keyPos)
         {
             if (!this->db || !rf || !this->keyBytes || this->keyBytes > HashLen || this->keyPos >= KP_Invalid)
-                throw BadArgs("Bad argumnets supplied to TxHash2TxNumMgr constructor");
+                throw BadArgs("Bad argumnets supplied to TxId2TxNumMgr constructor");
             mergeOp = db->GetOptions().merge_operator;
             if (!mergeOp || ! (concatOp = dynamic_cast<ConcatOperator *>(mergeOp.get())))
                 throw BadArgs("This db lacks a merge operator of type `ConcatOperator`");
             loadLargestTxNumSeen();
-            Debug() << "TxHash2TxNumMgr: largestTxNumSeen = " << largestTxNumSeen;
+            Debug() << "TxId2TxNumMgr: largestTxNumSeen = " << largestTxNumSeen;
         }
 
         unsigned mergeCount() const { return concatOp->merges.load(); }
@@ -526,13 +526,13 @@ namespace {
             const Tic t0;
             rocksdb::WriteBatch batch;
             for (TxNum i = 0; i < txInfos.size(); ++i) {
-                const ByteView key = makeKeyFromHash(txInfos[i].hash);
+                const ByteView key = makeKeyFromHash(txInfos[i].id);
                 const VarInt val(blockTxNum0 + i);
                 // save by appending VarInt. Note that this uses the 'ConcatOperator' class we defined in this file,
                 // which requires rocksdb be compiled with RTTI.
                 if (auto st = batch.Merge(ToSlice(key), ToSlice(val.byteView())); !st.ok())
-                    throw DatabaseError(QString("%1: batch merge fail for txHash %2: %3")
-                                        .arg(dbName(), QString(txInfos[i].hash.toHex()), QString::fromStdString(st.ToString())));
+                    throw DatabaseError(QString("%1: batch merge fail for txId %2: %3")
+                                        .arg(dbName(), QString(txInfos[i].id.toHex()), QString::fromStdString(st.ToString())));
             }
             if (auto st = db->Write(wrOpts, &batch) ; !st.ok())
                 throw DatabaseError(QString("%1: batch merge fail: %2").arg(dbName(), QString::fromStdString(st.ToString())));
@@ -638,11 +638,11 @@ namespace {
                    ", elapsed: ", t0.msecStr(), " msec");
         }
 
-        /// Returns a valid optional containing the TxNum of txHash if txHash is found in the db. A nullopt otherwise.
+        /// Returns a valid optional containing the TxNum of txId if txId is found in the db. A nullopt otherwise.
         /// May throw DatabaseError if there is a low-level deserialization error.
-        std::optional<TxNum> find(const TxHash &txHash) const {
+        std::optional<TxNum> find(const TxId &txId) const {
             std::optional<TxNum> ret;
-            const auto key = makeKeyFromHash(txHash);
+            const auto key = makeKeyFromHash(txId);
             auto optBytes = GenericDBGet<QByteArray>(db, key, true, dbName(), true, rdOpts);
             if (!optBytes) return ret; // missing
             auto span = MakeCSpan(*optBytes);
@@ -651,14 +651,14 @@ namespace {
             try {
                 while (!span.empty())
                     txNums.push_back(VarInt::deserialize(span).value<uint64_t>()); // this may throw
-                if (UNLIKELY(txNums.empty())) throw DatabaseFormatError(QString("Missing data for txHash: ") + QString(txHash.toHex()));
+                if (UNLIKELY(txNums.empty())) throw DatabaseFormatError(QString("Missing data for txId: ") + QString(txId.toHex()));
                 QString errStr;
                 // we may get more than 1 txNum for a particular key, so examine them all
                 const auto recs = rf->readRandomRecords(txNums, &errStr, true);
                 if (UNLIKELY(recs.size() != txNums.size())) throw DatabaseError("Expected recs.size() == txNums.size()!");
                 size_t i = 0;
                 for (const auto & rec : recs) {
-                    if (rec == txHash) {
+                    if (rec == txId) {
                         // found!
                         ret = txNums[i];
                         return ret;
@@ -666,9 +666,9 @@ namespace {
                     ++i;
                 }
             } catch (const std::exception &e) {
-                throw DatabaseError(dbName() + ": failed lookup for txHash " + QString(txHash.toHex()) + ": " + e.what());
+                throw DatabaseError(dbName() + ": failed lookup for txId " + QString(txId.toHex()) + ": " + e.what());
             }
-            return ret; // if we get here, ret is nullopt and txHash does not exist in db
+            return ret; // if we get here, ret is nullopt and txId does not exist in db
         }
 
         /// Find the TxNums for a batch of hashes. Returns a vector that is exactly the same size as hashes.
@@ -676,7 +676,7 @@ namespace {
         /// filled-in.
         ///
         /// May throw DatabaseError on low-level db error.
-        std::vector<std::optional<TxNum>> findMany(const std::vector<TxHash> &hashes) const {
+        std::vector<std::optional<TxNum>> findMany(const std::vector<TxId> &hashes) const {
             std::vector<std::optional<TxNum>> ret;
             if (hashes.empty()) return ret; // short-circuit return on no work to do
             const Tic t0;
@@ -738,7 +738,7 @@ namespace {
             return ret;
         }
 
-        bool exists(const TxHash &txHash) const { return bool(find(txHash)); }
+        bool exists(const TxId &txId) const { return bool(find(txId)); }
 
     private:
         ByteView makeKeyFromHash(const ByteView &bv) const {
@@ -894,7 +894,7 @@ namespace {
                 // fake it
                 fakeInfos.resize(recs.size());
                 for (size_t j = 0; j < recs.size(); ++j)
-                    fakeInfos[j].hash = recs[j];
+                    fakeInfos[j].id = recs[j];
                 insertForBlock(i, fakeInfos); // this throws on error
                 i += fakeInfos.size();
             }
@@ -926,12 +926,12 @@ namespace {
                 for (size_t j = 0; j < results.size()-1; ++j) {
                     if (!results[j]) throw DatabaseError("Expected a value not nullopt");
                     if (*results[j] != i) {
-                        static const std::set<QByteArray> DupeTxHashes = {
+                        static const std::set<QByteArray> DupeTxIds = {
                             // Before BIP34, there were dupe coinbase tx's... so we tolerate those here.
                             Util::ParseHexFast("d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599"),
                             Util::ParseHexFast("e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468"),
                         };
-                        if (!DupeTxHashes.count(recs[j]))
+                        if (!DupeTxIds.count(recs[j]))
                             throw DatabaseError(QString("Mismatched TxNum for hash: ") + QString(recs[j].toHex()));
                     }
                     ++verified;
@@ -945,9 +945,9 @@ namespace {
             Log() << "CheckDB: Verified " << verified << " total tx hashes, merge operations: " << mergeCount()
                   << ", elapsed: " << t0.secsStr(2) << " sec";
         }
-    }; // end class TxHash2TxNumMgr
+    }; // end class TxId2TxNumMgr
 
-    /* static */ const QByteArray TxHash2TxNumMgr::kLargestTxNumSeenKeyPrefix = "+largestTxNumSeen";
+    /* static */ const QByteArray TxId2TxNumMgr::kLargestTxNumSeenKeyPrefix = "+largestTxNumSeen";
 
 } // namespace
 
@@ -974,20 +974,20 @@ struct Storage::Pvt
         const rocksdb::ReadOptions defReadOpts; ///< avoid creating this each time
         const rocksdb::WriteOptions defWriteOpts; ///< avoid creating this each time
 
-        rocksdb::Options opts, shistOpts, txhash2txnumOpts;
+        rocksdb::Options opts, shistOpts, txid2txnumOpts;
         std::weak_ptr<rocksdb::Cache> blockCache; ///< shared across all dbs, caps total block cache size across all db instances
         std::weak_ptr<rocksdb::WriteBufferManager> writeBufferManager; ///< shared across all dbs, caps total memtable buffer size across all db instances
 
-        std::shared_ptr<ConcatOperator> concatOperator, concatOperatorTxHash2TxNum;
+        std::shared_ptr<ConcatOperator> concatOperator, concatOperatorTxId2TxNum;
 
         std::unique_ptr<rocksdb::DB> meta, blkinfo, utxoset,
                                      shist, shunspent, // scripthash_history and scripthash_unspent
                                      undo, // undo (reorg rewind)
-                                     txhash2txnum; // new: index of txhash -> txNumsFile
+                                     txid2txnum; // new: index of txhash -> txNumsFile
         using DBPtrRef = std::tuple<std::unique_ptr<rocksdb::DB> &>;
         std::list<DBPtrRef> openDBs; ///< a bit of introspection to track which dbs are currently open (used by gentlyCloseAllDBs())
 
-        std::unique_ptr<TxHash2TxNumMgr> txhash2txnumMgr; ///< provides a bit of a higher-level interface into the db
+        std::unique_ptr<TxId2TxNumMgr> txid2txnumMgr; ///< provides a bit of a higher-level interface into the db
     };
     RocksDBs db;
 
@@ -1022,20 +1022,20 @@ struct Storage::Pvt
 
     /// This cache is anticipated to see heavy use for get_history, so is configurable (config option: txhash_cache)
     /// This gets cleared by undoLatestBlock.
-    CostCache<TxNum, TxHash> lruNum2Hash; // NOTE: max size in bytes initted in constructor
+    CostCache<TxNum, TxId> lruNum2Hash; // NOTE: max size in bytes initted in constructor
     static constexpr unsigned lruNum2HashSizeCalc(unsigned nItems = 1) {
-        // NB: each TxHash (aka QByteArray) actually stores HashLen+1 bytes (QByteArray always appends a nul byte)
-        // NB2: each TxHash also has the QArrayData overhead (qByteArrayPvtDataSize())
+        // NB: each TxId (aka QByteArray) actually stores HashLen+1 bytes (QByteArray always appends a nul byte)
+        // NB2: each TxId also has the QArrayData overhead (qByteArrayPvtDataSize())
         return unsigned( decltype(lruNum2Hash)::itemOverheadBytes() + (nItems * (Util::qByteArrayPvtDataSize() + HashLen+1)) );
     }
 
-    /// Cache BlockHeight -> vector of txHashes for the block (in bitcoind memory order -- little endian).
-    /// This is used by the txHashesForBlock function only (which is used by get_merkle and id_from_pos in the RPC protocol).
-    CostCache<BlockHeight, QVector<TxHash>> lruHeight2Hashes_BitcoindMemOrder; // NOTE: max size in bytes initted in constructor
+    /// Cache BlockHeight -> vector of txIds for the block (in bitcoind memory order -- little endian).
+    /// This is used by the txIdsForBlock function only (which is used by get_merkle and id_from_pos in the RPC protocol).
+    CostCache<BlockHeight, QVector<TxId>> lruHeight2Hashes_BitcoindMemOrder; // NOTE: max size in bytes initted in constructor
     /// returns the cost for a particular cache item based on the number of hashes in the vector
     static constexpr unsigned lruHeight2HashSizeCalc(size_t nHashes) {
         // each cache item with nHashes takes roughly this much memory
-        return unsigned( (nHashes * ((HashLen+1) + sizeof(TxHash) + Util::qByteArrayPvtDataSize()))
+        return unsigned( (nHashes * ((HashLen+1) + sizeof(TxId) + Util::qByteArrayPvtDataSize()))
                          + decltype(lruHeight2Hashes_BitcoindMemOrder)::itemOverheadBytes() );
     }
 
@@ -1103,7 +1103,7 @@ Storage::Storage(const std::shared_ptr<const Options> & options_)
       subsmgr(new ScriptHashSubsMgr(options, this)),
       dspsubsmgr(new DSProofSubsMgr(options, this)),
       txsubsmgr(new TransactionSubsMgr(options, this)),
-      p(std::make_unique<Pvt>(options->txHashCacheBytes))
+      p(std::make_unique<Pvt>(options->txIdCacheBytes))
 {
     setObjectName("Storage");
     _thread.setObjectName(objectName());
@@ -1142,7 +1142,7 @@ void Storage::startup()
     {   // open all db's ...
 
         // Optimize RocksDB. This is the easiest way to get RocksDB to perform well
-        rocksdb::Options & opts(p->db.opts), &shistOpts(p->db.shistOpts), &txhash2txnumOpts(p->db.txhash2txnumOpts);
+        rocksdb::Options & opts(p->db.opts), &shistOpts(p->db.shistOpts), &txid2txnumOpts(p->db.txid2txnumOpts);
         opts.IncreaseParallelism(int(Util::getNPhysicalProcessors()));
         opts.OptimizeLevelStyleCompaction();
 
@@ -1173,8 +1173,8 @@ void Storage::startup()
         shistOpts = opts; // copy what we just did (will implicitly copy over the shared table_factory and write_buffer_manager)
         shistOpts.merge_operator = p->db.concatOperator = std::make_shared<ConcatOperator>(); // this set of options uses the concat merge operator (we use this to append to history entries in the db)
 
-        txhash2txnumOpts = opts;
-        txhash2txnumOpts.merge_operator = p->db.concatOperatorTxHash2TxNum = std::make_shared<ConcatOperator>();
+        txid2txnumOpts = opts;
+        txid2txnumOpts.merge_operator = p->db.concatOperatorTxId2TxNum = std::make_shared<ConcatOperator>();
 
 
         using DBInfoTup = std::tuple<QString, std::unique_ptr<rocksdb::DB> &, const rocksdb::Options &, double>;
@@ -1185,7 +1185,7 @@ void Storage::startup()
             { "scripthash_history", p->db.shist, shistOpts, 0.30 },
             { "scripthash_unspent", p->db.shunspent, opts, 0.27 },
             { "undo", p->db.undo, opts, 0.0395 },
-            { "txhash2txnum", p->db.txhash2txnum, txhash2txnumOpts, 0.1 },
+            { "txid2txnum", p->db.txid2txnum, txid2txnumOpts, 0.1 },
         };
         std::size_t memTotal = 0;
         const auto OpenDB = [this, &memTotal](const DBInfoTup &tup) {
@@ -1253,8 +1253,8 @@ void Storage::startup()
     loadCheckHeadersInDB();
     // check txnums
     loadCheckTxNumsFileAndBlkInfo();
-    // construct the TxHash2TxNum manager -- depends on the above function having constructed the txNumFile
-    loadCheckTxHash2TxNumMgr();
+    // construct the TxId2TxNum manager -- depends on the above function having constructed the txNumFile
+    loadCheckTxId2TxNumMgr();
     // count utxos -- note this depends on "blkInfos" being filled in so it much be called after loadCheckTxNumsFileAndBlkInfo()
     loadCheckUTXOsInDB();
     // very slow check, only runs if -C -C (specified twice)
@@ -1338,9 +1338,9 @@ auto Storage::stats() const -> Stats
 {
     // TODO ... more stuff here, perhaps
     QVariantMap ret;
-    auto & c = p->db.concatOperator, & c2 = p->db.concatOperatorTxHash2TxNum;
+    auto & c = p->db.concatOperator, & c2 = p->db.concatOperatorTxId2TxNum;
     ret["merge calls"] = c ? c->merges.load() : QVariant();
-    ret["merge calls (txhash2txnum)"] = c2 ? c2->merges.load() : QVariant();
+    ret["merge calls (txid2txnum)"] = c2 ? c2->merges.load() : QVariant();
     QVariantMap caches;
     {
         QVariantMap m;
@@ -1351,7 +1351,7 @@ auto Storage::stats() const -> Stats
         m["nItems"] = qlonglong(sz);
         m["~hits"] = qlonglong(p->lruCacheStats.num2HashHits);
         m["~misses"] = qlonglong(p->lruCacheStats.num2HashMisses);
-        caches["LRU Cache: TxNum -> TxHash"] = m;
+        caches["LRU Cache: TxNum -> TxId"] = m;
     }
     {
         QVariantMap m;
@@ -1362,7 +1362,7 @@ auto Storage::stats() const -> Stats
         m["nBlocks"] = nItems;
         m["~hits"] = qlonglong(p->lruCacheStats.height2HashesHits);
         m["~misses"] = qlonglong(p->lruCacheStats.height2HashesMisses);
-        caches["LRU Cache: Block Height -> TxHashes"] = m;
+        caches["LRU Cache: Block Height -> TxIds"] = m;
     }
     {
         const size_t nHashes = p->merkleCache->size(), bytes = nHashes * (HashLen + sizeof(HeaderHash));
@@ -1374,7 +1374,7 @@ auto Storage::stats() const -> Stats
         // db stats
         QVariantMap m;
         for (const auto ptr : { &p->db.blkinfo, &p->db.meta, &p->db.shist, &p->db.shunspent, &p->db.undo, &p->db.utxoset,
-                                &p->db.txhash2txnum }) {
+                                &p->db.txid2txnum }) {
             QVariantMap m2;
             const auto & db = *ptr;
             const QString name = QFileInfo(QString::fromStdString(db->GetName())).fileName();
@@ -1479,17 +1479,18 @@ void Storage::setCoin(const QString &coin) {
 TxNum Storage::getTxNum() const { return p->txNumNext.load(); }
 
 auto Storage::latestTip(Header *hdrOut) const -> std::pair<int, HeaderHash> {
-    std::pair<int, HeaderHash> ret = headerVerifier().first.lastHeaderProcessed(); // ok; lock stays locked until statement end.
-    if (hdrOut) *hdrOut = ret.second; // this is not a hash but the actual block header
-    if (ret.second.isEmpty() || ret.first < 0) {
-        ret.first = -1;
-        ret.second.clear();
-        if (hdrOut) hdrOut->clear();
-    } else {
-        // .ret now has the actual header but we want the hash
-        ret.second = BTC::HashRev(ret.second);
+    std::pair<int, bitcoin::CBlockHeader> ret = headerVerifier().first.lastHeaderProcessed(); // ok; lock stays locked until statement end.
+    if (ret.second.IsNull() || ret.first < 0) {
+        if(hdrOut) {
+            hdrOut->clear();
+        }
+        return std::pair(-1, HeaderHash());
     }
-    return ret;
+    if (hdrOut) {
+        hdrOut->clear();
+        *hdrOut = BTC::Serialize(ret.second);
+    }
+    return std::pair(ret.first, BTC::Hash2ByteArrayRev(ret.second.GetHash()));
 }
 
 auto Storage::latestHeight() const -> std::optional<BlockHeight>
@@ -1634,7 +1635,9 @@ void Storage::loadCheckHeadersInDB()
 
             auto [verif, lock] = headerVerifier();
             // set genesis hash
-            p->genesisHash = BTC::HashRev(hVec.front());
+            const auto genesisHeaderRaw = hVec.front();
+            const auto genesisHeader = BTC::Deserialize<bitcoin::CBlockHeader>(genesisHeaderRaw);
+            p->genesisHash = BTC::Hash2ByteArrayRev(genesisHeader.GetHash());
 
             const QString errMsg("Error retrieving header from db");
             err.clear();
@@ -1661,7 +1664,7 @@ void Storage::loadCheckHeadersInDB()
 void Storage::loadCheckTxNumsFileAndBlkInfo()
 {
     // may throw.
-    p->txNumsFile = std::make_unique<RecordFile>(options->datadir + QDir::separator() + "txnum2txhash", HashLen, 0x000012e2);
+    p->txNumsFile = std::make_unique<RecordFile>(options->datadir + QDir::separator() + "txnum2txid", HashLen, 0x000012e2);
     p->txNumNext = p->txNumsFile->numRecords();
     Debug() << "Read TxNumNext from file: " << p->txNumNext.load();
     TxNum ct = 0;
@@ -1690,47 +1693,47 @@ void Storage::loadCheckTxNumsFileAndBlkInfo()
 }
 
 // this depends on the above function having been run already
-void Storage::loadCheckTxHash2TxNumMgr()
+void Storage::loadCheckTxId2TxNumMgr()
 {
     // the below may throw
-    p->db.txhash2txnumMgr = std::make_unique<TxHash2TxNumMgr>(p->db.txhash2txnum.get(), p->db.defReadOpts, p->db.defWriteOpts,
-                                                              p->txNumsFile.get(), 6, TxHash2TxNumMgr::KeyPos::End);
+    p->db.txid2txnumMgr = std::make_unique<TxId2TxNumMgr>(p->db.txid2txnum.get(), p->db.defReadOpts, p->db.defWriteOpts,
+                                                              p->txNumsFile.get(), 6, TxId2TxNumMgr::KeyPos::End);
     try {
         // basic sanity checks -- ensure we can read the first, middle, and last hash in the txNumsFile,
-        // and that those hashes exist in the txhash2txnum db
+        // and that those hashes exist in the txid2txnum db
         const QString errMsg = "The txhash index failed basic sanity checks -- it is missing some records.";
         const auto nrecs = p->txNumsFile->numRecords();
         if (nrecs) {
             for (auto recNum : {uint64_t(0), uint64_t(nrecs/2), uint64_t(nrecs-1)}) {
-                if (!p->db.txhash2txnumMgr->exists(p->txNumsFile->readRecord(recNum)))
+                if (!p->db.txid2txnumMgr->exists(p->txNumsFile->readRecord(recNum)))
                     throw DatabaseError(errMsg);
             }
         } else {
             // sanity check on empty db: if no records, db should also have no rows
-            std::unique_ptr<rocksdb::Iterator> it(p->db.txhash2txnum->NewIterator(p->db.defReadOpts));
+            std::unique_ptr<rocksdb::Iterator> it(p->db.txid2txnum->NewIterator(p->db.defReadOpts));
             for (it->SeekToFirst(); it->Valid(); it->Next()) {
                 throw DatabaseFormatError(QString("Failed invariant: empty txNum file should mean empty db; ") + errMsg);
             }
         }
 
-        if (p->db.txhash2txnumMgr->maxTxNumSeenInDB()+1 != int64_t(nrecs))
+        if (p->db.txid2txnumMgr->maxTxNumSeenInDB()+1 != int64_t(nrecs))
             throw DatabaseFormatError(QString("Failed invariant: txNumCount != nrecs; ") + errMsg);
 
         if (options->doSlowDbChecks) // require the slow check for this one
-            p->db.txhash2txnumMgr->consistencyCheck();
+            p->db.txid2txnumMgr->consistencyCheck();
         if (options->doSlowDbChecks >= 3) // the below check is very slow so we require -C -C -C
-            p->db.txhash2txnumMgr->consistencyCheckSlowRev();
+            p->db.txid2txnumMgr->consistencyCheckSlowRev();
     } catch (const DatabaseError &e) {
         // Database error -- user either lacks the database (upgrade needed) or they have it and it is corrupted --
         // attempt to rebuild it.
-        if (p->db.txhash2txnumMgr->maxTxNumSeenInDB() > -1) {
+        if (p->db.txid2txnumMgr->maxTxNumSeenInDB() > -1) {
             Warning() << e.what();
             Log() << "Rebuilding txhash index, please wait ...";
         } else {
             Debug() << e.what();
             Log() << "Upgrading database, this may take from 1-10 minutes, please wait ...";
         }
-        p->db.txhash2txnumMgr->rebuildDB();
+        p->db.txid2txnumMgr->rebuildDB();
     }
 }
 
@@ -1907,8 +1910,8 @@ void Storage::loadCheckShunspentInDB()
         info.hashX = hashx;
         info.amount = amount;
         info.confirmedHeight = heightForTxNum(ctxo.txNum());
-        const TxHash txHash = hashForTxNum(ctxo.txNum(), true, nullptr, true).value_or(QByteArray()); // throws if missing
-        const TXO txo{txHash, ctxo.N()};
+        const TxId txId = txidForTxNum(ctxo.txNum(), true, nullptr, true).value_or(QByteArray()); // throws if missing
+        const TXO txo{txId, ctxo.N()};
         // look for this in the UTXO db
         const auto optInfo = GenericDBGet<TXOInfo>(p->db.utxoset.get(), ToSlice(Serialize(txo)), true, "", false, p->db.defReadOpts);
         if (!optInfo) {
@@ -2118,12 +2121,12 @@ std::optional<TXOInfo> Storage::utxoGet(const TXO &txo)
     auto [mempool, lock] = this->mempool(); // shared (read only) lock is held until scope end
 
     // first, check mempool
-    if (auto txsIt = mempool.txs.find(txo.txHash); txsIt != mempool.txs.end()) {
+    if (auto txsIt = mempool.txs.find(txo.txId); txsIt != mempool.txs.end()) {
         mempoolHit = true; // flag mempool hit so that we don't redundantly check db at end of this function
         const auto & tx = txsIt->second;
         if (UNLIKELY(!tx)) {
             // Paranoia to detect bugs. This will never happen.
-            throw InternalError(QString("TxRef for %1 is null! FIXME!").arg(QString(txo.txHash.toHex())));
+            throw InternalError(QString("TxRef for %1 is null! FIXME!").arg(QString(txo.txId.toHex())));
         }
         if (txo.outN < tx->txos.size()) {
             const TXOInfo & info = tx->txos[txo.outN];
@@ -2162,7 +2165,7 @@ std::optional<TXOInfo> Storage::utxoGet(const TXO &txo)
                         // should never happen
                         throw InternalError(QString("scripthash %1 has inconsistent mempool state for tx %2! FIXME!")
                                             .arg(QString(hxTxIt->first.toHex()))
-                                            .arg(QString(tx->hash.toHex())));
+                                            .arg(QString(tx->txid.toHex())));
                     }
                 }
             }
@@ -2202,13 +2205,13 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
             // Txs in block can never be in mempool. Ensure they are gone from mempool right away so that notifications
             // to clients are as accurate as possible (notifications may happen after this function returns).
             const auto sz = ppb->txInfos.size();
-            const auto rsvsz = static_cast<Mempool::TxHashNumMap::size_type>(sz > 0 ? sz-1 : 0);
-            Mempool::TxHashNumMap txidMap(/* bucket_count: */ rsvsz);
+            const auto rsvsz = static_cast<Mempool::TxIdNumMap::size_type>(sz > 0 ? sz-1 : 0);
+            Mempool::TxIdNumMap txidMap(/* bucket_count: */ rsvsz);
             notify->txidsAffected.reserve(rsvsz);
             for (std::size_t i = 1 /* skip coinbase */; i < sz; ++i) {
-                const auto & txHash = ppb->txInfos[i].hash;
-                txidMap.emplace(txHash, blockTxNum0 + i);
-                notify->txidsAffected.insert(txHash); // add to notify set for txSubsMgr
+                const auto & txId = ppb->txInfos[i].id;
+                txidMap.emplace(txId, blockTxNum0 + i);
+                notify->txidsAffected.insert(txId); // add to notify set for txSubsMgr
             }
             Mempool::ScriptHashesAffectedSet affected;
             // Pre-reserve some capacity for the tmp affected set to avoid much rehashing.
@@ -2246,7 +2249,8 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                 }
                 // save raw header back to our buffer -- this will be used at the end of this function to add it to the db
                 // after everything completes successfully.
-                rawHeader = p->headerVerifier.lastHeaderProcessed().second;
+
+                rawHeader = BTC::Serialize(p->headerVerifier.lastHeaderProcessed().second);
             }
 
             setDirty(true); // <--  no turning back. if the app crashes unexpectedly while this is set, on next restart it will refuse to run and insist on a clean resynch.
@@ -2255,7 +2259,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                 auto batch = p->txNumsFile->beginBatchAppend(); // may throw if io error in c'tor here.
                 QString errStr;
                 for (const auto & txInfo : ppb->txInfos) {
-                    if (!batch.append(txInfo.hash, &errStr)) // does not throw here, but we do.
+                    if (!batch.append(txInfo.id, &errStr)) // does not throw here, but we do.
                         throw InternalError(QString("Batch append for txNums failed: %1.").arg(errStr));
                 }
                 // <-- The batch d'tor may close the app on error here with Fatal() if a low-level file error occurs now
@@ -2274,11 +2278,11 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
             if (ppb->txInfos.size() > 1000) {
                 // submit this to the co-task for blocks with enough txs
                 fut = p->blocksWorker->submitWork([&]{
-                    p->db.txhash2txnumMgr->insertForBlock(blockTxNum0, ppb->txInfos);
+                    p->db.txid2txnumMgr->insertForBlock(blockTxNum0, ppb->txInfos);
                 });
             } else {
                 // otherwise just do the work ourselves immediately here since this is likely faster (less overhead)
-                p->db.txhash2txnumMgr->insertForBlock(blockTxNum0, ppb->txInfos);
+                p->db.txid2txnumMgr->insertForBlock(blockTxNum0, ppb->txInfos);
             }
 
             constexpr bool debugPrt = false;
@@ -2304,16 +2308,16 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                             const auto & out = ppb->outputs[oidx];
                             if (out.spentInInputIndex.has_value()) {
                                 if constexpr (debugPrt)
-                                    Debug() << "Skipping output #: " << oidx << " for " << ppb->txInfos[out.txIdx].hash.toHex() << " (was spent in same block tx: " << ppb->txInfos[ppb->inputs[*out.spentInInputIndex].txIdx].hash.toHex() << ")";
+                                    Debug() << "Skipping output #: " << oidx << " for " << ppb->txInfos[out.txIdx].id.toHex() << " (was spent in same block tx: " << ppb->txInfos[ppb->inputs[*out.spentInInputIndex].txIdx].id.toHex() << ")";
                                 continue;
                             }
-                            const TxHash & hash = ppb->txInfos[out.txIdx].hash;
+                            const TxId & txid = ppb->txInfos[out.txIdx].id;
                             TXOInfo info;
                             info.hashX = hashX;
                             info.amount = out.amount;
                             info.confirmedHeight = ppb->height;
                             info.txNum = blockTxNum0 + out.txIdx;
-                            const TXO txo{ hash, out.outN };
+                            const TXO txo{ txid, out.outN };
                             const CompactTXO ctxo(info.txNum, txo.outN);
                             utxoBatch.add(txo, info, ctxo); // add to db
                             if (undo) { // save undo info if we are in saveUndo mode
@@ -2321,7 +2325,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                             }
                             if constexpr (debugPrt)
                                 Debug() << "Added txo: " << txo.toString()
-                                        << " (txid: " << hash.toHex() << " height: " << ppb->height << ") "
+                                        << " (txid: " << txid.toHex() << " height: " << ppb->height << ") "
                                         << " amount: " << info.amount.ToString() << " for HashX: " << info.hashX.toHex();
                         }
                     }
@@ -2329,7 +2333,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                     // add spends (process inputs)
                     unsigned inum = 0;
                     for (auto & in : ppb->inputs) {
-                        const TXO txo{in.prevoutHash, in.prevoutN};
+                        const TXO txo{in.prevoutTxId, in.prevoutN};
                         if (!inum) {
                             // coinbase.. skip
                         } else if (in.parentTxOutIdx.has_value()) {
@@ -2350,7 +2354,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
 
                             }
                             if constexpr (debugPrt) {
-                                const auto dbgTxIdHex = ppb->txHashForInputIdx(inum).toHex();
+                                const auto dbgTxIdHex = ppb->txIdForInputIdx(inum).toHex();
                                 Debug() << "Spent " << txo.toString() << " amount: " << info.amount.ToString()
                                         << " in txid: "  << dbgTxIdHex << " height: " << ppb->height
                                         << " input number: " << ppb->numForInputIdx(inum).value_or(0xffff)
@@ -2364,9 +2368,9 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                         } else {
                             QString s;
                             {
-                                const auto dbgTxIdHex = ppb->txHashForInputIdx(inum).toHex();
+                                const auto dbgTxIdHex = ppb->txIdForInputIdx(inum).toHex();
                                 QTextStream ts(&s);
-                                ts << "Failed to spend: " << in.prevoutHash.toHex() << ":" << in.prevoutN << " (spending txid: " << dbgTxIdHex << ")";
+                                ts << "Failed to spend: " << in.prevoutTxId.toHex() << ":" << in.prevoutN << " (spending txid: " << dbgTxIdHex << ")";
                             }
                             throw InternalError(s);
                         }
@@ -2495,8 +2499,9 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
             appendHeader(rawHeader, ppb->height);
 
             if (UNLIKELY(ppb->height == 0)) {
-                // update genesis hash now if block 0 -- this info is used by rpc method server.features
-                p->genesisHash = BTC::HashRev(rawHeader); // this variable is guarded by p->headerVerifierLock
+                const auto genesisHeader = BTC::Deserialize<bitcoin::CBlockHeader>(rawHeader);
+                // update genesis hash now if block 0 -- this info is used by rpc method server.feature.
+                p->genesisHash = BTC::Hash2ByteArrayRev(genesisHeader.GetHash()); // this variable is guarded by p->headerVerifierLock
             }
 
             saveUtxoCt();
@@ -2562,7 +2567,7 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
         p->mempool.clear(); // make sure mempool is clean (see note above as to why)
 
         const auto [tip, header] = p->headerVerifier.lastHeaderProcessed();
-        if (tip <= 0 || header.length() != p->blockHeaderSize()) throw UndoInfoMissing("No header to undo");
+        if (tip <= 0) throw UndoInfoMissing("No header to undo");
         prevHeight = unsigned(tip-1);
         Header prevHeader;
         {
@@ -2579,7 +2584,7 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
         auto & undo = *undoOpt; // non-const because we swap out its scripthashes potentially below if notifySubs == true
 
         // ensure undo info sanity
-        if (!undo.isValid() || undo.height != unsigned(tip) || undo.hash != BTC::HashRev(header)
+        if (!undo.isValid() || undo.height != unsigned(tip) || undo.hash != BTC::Hash2ByteArrayRev(header.GetHash())
             || prevHeight+1 >= p->blkInfos.size() || p->blkInfos.empty() || p->blkInfos.back() != undo.blkInfo)
             throw DatabaseFormatError(QString("The undo information for height %1 was successfully retrieved from the "
                                               "database, but it failed an internal consistency check.").arg(tip));
@@ -2598,7 +2603,7 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
             GenericDBDelete(p->db.blkinfo.get(), uint32_t(undo.height), "Failed to delete blkInfo in undoLatestBlock");
             // clear num2hash cache
             p->lruNum2Hash.clear();
-            // remove block from txHashes cache
+            // remove block from txIds cache
             p->lruHeight2Hashes_BitcoindMemOrder.remove(undo.height);
 
             const auto txNum0 = undo.blkInfo.txNum0;
@@ -2606,7 +2611,7 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
             // Asynch task -- the future will automatically be awaited on scope end (even if we throw here!)
             // Note: we await the result later down in this function before we truncate the txNumsFile. (Assumption
             // here is that the txNumsFile has all the hashes we want to delete until the below operation is done).
-            CoTask::Future fut = p->blocksWorker->submitWork([&]{ p->db.txhash2txnumMgr->truncateForUndo(txNum0);});
+            CoTask::Future fut = p->blocksWorker->submitWork([&]{ p->db.txid2txnumMgr->truncateForUndo(txNum0);});
 
             // undo the scripthash histories
             for (const auto & sh : undo.scriptHashes) {
@@ -2665,11 +2670,11 @@ BlockHeight Storage::undoLatestBlock(bool notifySubs)
 
             // add all tx hashes that we are rolling back to the notify set for the txSubsMgr
             if (notify) {
-                const auto txHashes = p->txNumsFile->readRecords(txNum0, undo.blkInfo.nTx);
-                notify->txidsAffected.insert(txHashes.begin(), txHashes.end());
+                const auto txIds = p->txNumsFile->readRecords(txNum0, undo.blkInfo.nTx);
+                notify->txidsAffected.insert(txIds.begin(), txIds.end());
             }
 
-            // Wait for the txhash2txnum truncate to finish before we proceed, since that co-task assumes the txNumsFile
+            // Wait for the txid2txnum truncate to finish before we proceed, since that co-task assumes the txNumsFile
             // won't change.
             if (fut.future.valid())
                 fut.future.get(); // this may throw if task threw
@@ -2742,9 +2747,9 @@ int64_t Storage::readUtxoCtFromDB() const
 }
 
 
-std::optional<TxHash> Storage::hashForTxNum(TxNum n, bool throwIfMissing, bool *wasCached, bool skipCache) const
+std::optional<TxId> Storage::txidForTxNum(TxNum n, bool throwIfMissing, bool *wasCached, bool skipCache) const
 {
-    std::optional<TxHash> ret;
+    std::optional<TxId> ret;
     if (!skipCache) ret = p->lruNum2Hash.object(n);
     if (ret.has_value()) {
         if (wasCached) *wasCached = true;
@@ -2753,7 +2758,7 @@ std::optional<TxHash> Storage::hashForTxNum(TxNum n, bool throwIfMissing, bool *
     } else if (wasCached) *wasCached = false;
     if (!skipCache) ++p->lruCacheStats.num2HashMisses;
 
-    static const QString kErrMsg ("Error reading TxHash for TxNum %1: %2");
+    static const QString kErrMsg ("Error reading TxId for TxNum %1: %2");
     QString errStr;
     const auto bytes = p->txNumsFile->readRecord(n, &errStr);
     if (bytes.isEmpty()) {
@@ -2790,9 +2795,9 @@ std::optional<unsigned> Storage::heightForTxNum_nolock(TxNum n) const
     return ret;
 }
 
-std::optional<TxHash> Storage::hashForHeightAndPos(BlockHeight height, unsigned posInBlock) const
+std::optional<TxId> Storage::hashForHeightAndPos(BlockHeight height, unsigned posInBlock) const
 {
-    std::optional<TxHash> ret;
+    std::optional<TxId> ret;
     TxNum txNum = 0;
     SharedLockGuard(p->blocksLock); // guarantee a consistent view (so that data doesn't mutate from underneath us)
     {
@@ -2804,14 +2809,14 @@ std::optional<TxHash> Storage::hashForHeightAndPos(BlockHeight height, unsigned 
             return ret;
         txNum = bi.txNum0 + posInBlock;
     }
-    ret = hashForTxNum(txNum);
+    ret = txidForTxNum(txNum);
     return ret;
 }
 
 // NOTE: the returned vector has hashes in bitcoind memory order (little endian -- unlike every other function in this file!)
-std::vector<TxHash> Storage::txHashesForBlockInBitcoindMemoryOrder(BlockHeight height) const
+std::vector<TxId> Storage::txIdsForBlockInBitcoindMemoryOrder(BlockHeight height) const
 {
-    std::vector<TxHash> ret;
+    std::vector<TxId> ret;
     std::pair<TxNum, size_t> startCount{0,0};
     SharedLockGuard(p->blocksLock); // guarantee a consistent view (so that data doesn't mutate from underneath us)
     {
@@ -2848,9 +2853,9 @@ std::vector<TxHash> Storage::txHashesForBlockInBitcoindMemoryOrder(BlockHeight h
         // put result in cache
         p->lruHeight2Hashes_BitcoindMemOrder.insert(height,
 #if QT_VERSION < QT_VERSION_CHECK(5, 14, 0)
-                                                    QVector<TxHash>::fromStdVector(ret),
+                                                    QVector<TxId>::fromStdVector(ret),
 #else
-                                                    Util::toVec<QVector<TxHash>>(ret),
+                                                    Util::toVec<QVector<TxId>>(ret),
 #endif
                                                     p->lruHeight2HashSizeCalc(ret.size()));
     }
@@ -2882,9 +2887,9 @@ auto Storage::getHistory(const HashX & hashX, bool conf, bool unconf) const -> H
                 // low hanging fruit for optimization -- thus I am leaving this comment here so I can remember to come
                 // back and optmize the below.  /TODO
                 for (auto num : nums) {
-                    auto hash = hashForTxNum(num).value(); // may throw, but that indicates some database inconsistency. we catch below
+                    auto txid = txidForTxNum(num).value(); // may throw, but that indicates some database inconsistency. we catch below
                     auto height = heightForTxNum(num).value(); // may throw, same deal
-                    ret.emplace_back(HistoryItem{hash, int(height), {}});
+                    ret.emplace_back(HistoryItem{txid, int(height), {}});
                 }
             }
         }
@@ -2899,7 +2904,7 @@ auto Storage::getHistory(const HashX & hashX, bool conf, bool unconf) const -> H
                 }
                 ret.reserve(total);
                 for (const auto & tx : txvec)
-                    ret.emplace_back(HistoryItem{tx->hash, tx->hasUnconfirmedParentTx ? -1 : 0, tx->fee});
+                    ret.emplace_back(HistoryItem{tx->txid, tx->hasUnconfirmedParentTx ? -1 : 0, tx->fee});
             }
         }
     } catch (const std::exception &e) {
@@ -2946,7 +2951,7 @@ auto Storage::listUnspent(const HashX & hashX) const -> UnspentItems
                                         LIKELY( ionum < tx->txos.size() && (it3 = tx->txos.cbegin() + ionum)->isValid() ))
                                 {
                                     ret.emplace_back(UnspentItem{
-                                        { tx->hash, 0 /* always put 0 for height here */, tx->fee }, // base HistoryItem
+                                        { tx->txid, 0 /* always put 0 for height here */, tx->fee }, // base HistoryItem
                                         ionum, // .tx_pos
                                         it3->amount,  // .value
                                         TxNum(1) + veryHighTxNum + TxNum(tx->hasUnconfirmedParentTx ? 1 : 0), // .txNum (this is fudged for sorting at the end properly)
@@ -2957,13 +2962,13 @@ auto Storage::listUnspent(const HashX & hashX) const -> UnspentItems
                                     }
                                 } else {
                                     // this should never happen!
-                                    Warning() << "Cannot find txo " << ionum << " for sh " << hashX.toHex() << " in tx " << tx->hash.toHex();
+                                    Warning() << "Cannot find txo " << ionum << " for sh " << hashX.toHex() << " in tx " << tx->txid.toHex();
                                     continue;
                                 }
                             }
                         } else {
                             // defensive programming. should never happen
-                            Warning() << "Cannot find scripthash " << hashX.toHex() << " in tx 'hashX -> IOInfo' map for tx " << tx->hash.toHex() << ". FIXME!";
+                            Warning() << "Cannot find scripthash " << hashX.toHex() << " in tx 'hashX -> IOInfo' map for tx " << tx->txid.toHex() << ". FIXME!";
                         }
                     }
                 }
@@ -2989,16 +2994,16 @@ auto Storage::listUnspent(const HashX & hashX) const -> UnspentItems
                 }
                 for (const auto & ctxo : ctxoList) {
                     static const QString err("Error retrieving the utxo for an unspent item");
-                    const auto hash = hashForTxNum(ctxo.txNum()).value(); // may throw, but that indicates some database inconsistency. we catch below
+                    const auto txid = txidForTxNum(ctxo.txNum()).value(); // may throw, but that indicates some database inconsistency. we catch below
                     const auto height = heightForTxNum(ctxo.txNum()).value(); // may throw, same deal
-                    const TXO txo{ hash, ctxo.N() };
+                    const TXO txo{ txid, ctxo.N() };
                     if (mempoolConfirmedSpends.count(txo))
                         // Skip items that are spent in mempool. This fixes a bug in Fulcrum 1.0.2 or earlier where the
                         // confirmed spends in the mempool were still appearing in the listunspent utxos.
                         continue;
                     auto info = GenericDBGetFailIfMissing<TXOInfo>(p->db.utxoset.get(), txo, err, false, p->db.defReadOpts); // may throw -- indicates db inconsistency
                     ret.emplace_back(UnspentItem{
-                        { hash, int(height), {} }, // base HistoryItem
+                        { txid, int(height), {} }, // base HistoryItem
                         txo.outN,  // .tx_pos
                         info.amount, // .value
                         info.txNum, // .txNum
@@ -3060,7 +3065,7 @@ auto Storage::getBalance(const HashX &hashX) const -> std::pair<bitcoin::Amount,
                     auto it2 = tx->hashXs.find(hashX);
                     if (UNLIKELY(it2 == tx->hashXs.end())) {
                         throw InternalError(QString("scripthash %1 lists tx %2, which then lacks the IOInfo for said hashX! FIXME!")
-                                            .arg(QString(hashX.toHex())).arg(QString(tx->hash.toHex())));
+                                            .arg(QString(hashX.toHex())).arg(QString(tx->txid.toHex())));
                     }
                     auto & info = it2->second;
                     for (const auto & [txo, txoinfo] : info.confirmedSpends)
@@ -3070,7 +3075,7 @@ auto Storage::getBalance(const HashX &hashX) const -> std::pair<bitcoin::Amount,
                                                                        || !(it3 = tx->txos.cbegin() + ionum)->isValid()) )
                         {
                             throw InternalError(QString("scripthash %1 lists tx %2, which then lacks a valid TXO IONum %3 for said hashX! FIXME!")
-                                                .arg(QString(hashX.toHex())).arg(QString(tx->hash.toHex())).arg(ionum));
+                                                .arg(QString(hashX.toHex())).arg(QString(tx->txid.toHex())).arg(ionum));
                         } else {
                             utxos += it3->amount;
                         }
@@ -3176,22 +3181,22 @@ auto Storage::mempoolHistogram() const -> Mempool::FeeHistogramVec
 }
 
 
-auto Storage::getTxHeights(const std::vector<TxHash> &txHashes) const -> TxHeightsResult
+auto Storage::getTxHeights(const std::vector<TxId> &txIds) const -> TxHeightsResult
 {
     TxHeightsResult ret;
-    ret.reserve(txHashes.size());
+    ret.reserve(txIds.size());
 
     SharedLockGuard g(p->blocksLock);
-    auto txNums = p->db.txhash2txnumMgr->findMany(txHashes);
-    if (UNLIKELY(txNums.size() != txHashes.size()))
+    auto txNums = p->db.txid2txnumMgr->findMany(txIds);
+    if (UNLIKELY(txNums.size() != txIds.size()))
         // this should never happen
         throw InternalError("findMany() returned an unexpected number of elements! FIXME!");
 
     // missing txNums need a mempool check; check in mempool
     {
         auto [mempool, lock] =  this->mempool(); // mempool lock is ok to take with blocksLock held
-        for (size_t i = 0; i < txHashes.size(); ++i) {
-            if (!txNums[i] && mempool.txs.count(txHashes[i]))
+        for (size_t i = 0; i < txIds.size(); ++i) {
+            if (!txNums[i] && mempool.txs.count(txIds[i]))
                 txNums[i] = 0; // 0 = mempool tx
         }
     }
@@ -3207,13 +3212,13 @@ auto Storage::getTxHeights(const std::vector<TxHash> &txHashes) const -> TxHeigh
     return ret;
 }
 
-auto Storage::getTxHeight(const TxHash &h) const -> std::optional<BlockHeight>
+auto Storage::getTxHeight(const TxId &h) const -> std::optional<BlockHeight>
 {
-    // We could have just called the above function but the below is a bit faster since it calls TxHash2TxNumMgr::find()
+    // We could have just called the above function but the below is a bit faster since it calls TxId2TxNumMgr::find()
     // rather than findMany(), which is slightly faster.
     std::optional<BlockHeight> ret;
     SharedLockGuard g(p->blocksLock);
-    const auto optTxNum = p->db.txhash2txnumMgr->find(h);
+    const auto optTxNum = p->db.txid2txnumMgr->find(h);
     if (optTxNum) {
         // resolve txNum -> height; this ends up taking blkInfoLock (shared mode)
         ret = heightForTxNum(*optTxNum);
@@ -3616,7 +3621,7 @@ namespace {
     enum class MyPos { Beginning, Middle, End};
 
     template <size_t NB, MyPos where = MyPos::End>
-    ByteView MakeTxHashByteKey(const ByteView &bv) {
+    ByteView MakeTxIdByteKey(const ByteView &bv) {
         const auto len = bv.size();
         if (UNLIKELY(len != HashLen))
             throw BadArgs(QString("%1... is not %2 bytes").arg(QString(Util::ToHexFast(bv.substr(0, 8).toByteArray(false)))).arg(HashLen));
@@ -3630,11 +3635,11 @@ namespace {
     }
 
     template <size_t NB, MyPos where = MyPos::End, typename KeyType = decltype(DeduceSmallestTypeForNumBytes<NB>())>
-    KeyType MakeTxHashNumericKey(const ByteView &bv) {
+    KeyType MakeTxIdNumericKey(const ByteView &bv) {
         static_assert(NB <= sizeof(KeyType));
         static_assert(std::is_pod_v<KeyType> && !std::is_floating_point_v<KeyType>);
         KeyType ret{};
-        std::memcpy(reinterpret_cast<std::byte *>(&ret), MakeTxHashByteKey<NB, where>(bv).data(), NB);
+        std::memcpy(reinterpret_cast<std::byte *>(&ret), MakeTxIdByteKey<NB, where>(bv).data(), NB);
         return ret;
     }
 
@@ -3667,7 +3672,7 @@ namespace {
             QString err;
             const auto recs = rf->readRecords(i, batchSize, &err);
             for (const auto & rec : recs) {
-                const auto key = MakeTxHashNumericKey<NB, POS>(rec);
+                const auto key = MakeTxIdNumericKey<NB, POS>(rec);
                 const auto val = ++cols[key];
                 if (val > 1) {
                     if (val > maxCol) {

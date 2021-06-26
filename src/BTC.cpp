@@ -20,6 +20,7 @@
 #include "Common.h"
 #include "Util.h"
 
+#include "bitcoin/blockhash.h"
 #include "bitcoin/crypto/endian.h"
 #include "bitcoin/crypto/sha256.h"
 #include "bitcoin/hash.h"
@@ -115,22 +116,17 @@ namespace BTC
         if (!checkInner(height, curHdr, err))
             return false;
         prevHeight = height;
-        prev = header;
+        prev = curHdr;
         if (err) err->clear();
         return true;
     }
     bool HeaderVerifier::operator()(const bitcoin::CBlockHeader &curHdr, QString *err)
     {
         const long height = prevHeight+1;
-        QByteArray header = Serialize(curHdr);
-        if (header.size() != BTC::GetBlockHeaderSize()) {
-            if (err) *err = QString("Header verification failed for header at height %1: wrong size").arg(height);
-            return false;
-        }
         if (!checkInner(height, curHdr, err))
             return false;
         prevHeight = height;
-        prev = header;
+        prev = curHdr;
         if (err) err->clear();
         return true;
     }
@@ -141,13 +137,17 @@ namespace BTC
             if (err) *err = QString("Header verification failed for header at height %1: failed to deserialize").arg(height);
             return false;
         }
-        if (!prev.isEmpty() && Hash(prev) != QByteArray::fromRawData(reinterpret_cast<const char *>(curHdr.hashPrevBlock.begin()), int(curHdr.hashPrevBlock.width())) ) {
+        bitcoin::BlockHash nullHash;
+        if(prev.IsNull() && prevHeight == -1) {// && curHdr.hashPrevBlock == nullHash) {
+            return true;
+        }
+        if (prev.GetHash() != curHdr.hashPrevBlock) {
             if (err) *err = QString("Header %1 'hashPrevBlock' does not match the contents of the previous block").arg(height);
             return false;
         }
         return true;
     }
-    std::pair<int, QByteArray> HeaderVerifier::lastHeaderProcessed() const
+    std::pair<int, bitcoin::CBlockHeader> HeaderVerifier::lastHeaderProcessed() const
     {
         return { int(prevHeight), prev };
     }

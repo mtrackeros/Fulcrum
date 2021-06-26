@@ -184,17 +184,17 @@ public:
     /// convenience method  (thread safe, lock-free)
     bool isNewlyInitialized() const { return getTxNum() == 0; }
 
-    /// Helper for TxNum. Resolve a 64-bit TxNum to a TxHash -- this may throw a DatabaseError if throwIfMissing=true (thread safe, takes no class-level locks)
-    std::optional<TxHash> hashForTxNum(TxNum, bool throwIfMissng = false, bool *wasCached = nullptr, bool skipCache = false) const;
+    /// Helper for TxNum. Resolve a 64-bit TxNum to a TxId -- this may throw a DatabaseError if throwIfMissing=true (thread safe, takes no class-level locks)
+    std::optional<TxId> txidForTxNum(TxNum, bool throwIfMissng = false, bool *wasCached = nullptr, bool skipCache = false) const;
     /// Given a TxNum, returns the block height for the TxNum's block (if it exists).
     /// Used to resolve scripthash_history -> block height for get_history. (thread safe, takes blkInfo lock)
     std::optional<unsigned> heightForTxNum(TxNum) const;
-    /// Given a block height and a position in the block (txIdx), return a TxHash.  Never throws. Returns !has_value if
+    /// Given a block height and a position in the block (txIdx), return a TxId.  Never throws. Returns !has_value if
     /// height/posInBlock pair is not found (or in very unlikely cases, if there was an underlying low-level error).
     /// Thread safe, takes class-level locks.
-    std::optional<TxHash> hashForHeightAndPos(BlockHeight height, unsigned posInBlock) const;
+    std::optional<TxId> hashForHeightAndPos(BlockHeight height, unsigned posInBlock) const;
 
-    /// Given a block height, return all of the TxHashes in a block, in bitcoind memory order.
+    /// Given a block height, return all of the TxIds in a block, in bitcoind memory order.
     ///
     /// NOTE: Unlike all of the other functions in this class, the returned hashes are in bitcoind memory order
     /// (rather than reversed hex-encode-ready memory order as we use everywhere else).  This is because this function
@@ -204,7 +204,7 @@ public:
     /// underlying low-level error).
     ///
     /// Thread safe, takes class-level locks.
-    std::vector<TxHash> txHashesForBlockInBitcoindMemoryOrder(BlockHeight height) const;
+    std::vector<TxId> txIdsForBlockInBitcoindMemoryOrder(BlockHeight height) const;
 
     /// Returns the known size of the utxo set (for now this is a signed value -- to debug underflow errors)
     int64_t utxoSetSize() const;
@@ -213,7 +213,7 @@ public:
 
     //-- scritphash history
     struct HistoryItem {
-        TxHash hash;
+        TxId hash;
         int height = 0; ///< block height. 0 = unconfirmed, -1 = unconfirmed with unconfirmed parent. Note this is ambiguous with block 0 :(
         std::optional<bitcoin::Amount> fee; ///< fee, if known. this is only ever populated with a value for unconfirmed (mempool) tx's
 
@@ -291,16 +291,16 @@ public:
     // -- Tx Hash index based methods
     using TxHeightsResult = std::vector<std::optional<BlockHeight>>;
     /// Thread-safe. Does take mempool, blkInfo, and blocksLock locks in shared mode. Returns an array whose length is
-    /// equal to txHashes.size(), and for each element: if the optional is valid, then BlockHeight=0 means mempool,
-    /// and >0 means a confirmed height. If a particular TxHash was not found in the mempool or blockchain, that element
+    /// equal to txIds.size(), and for each element: if the optional is valid, then BlockHeight=0 means mempool,
+    /// and >0 means a confirmed height. If a particular TxId was not found in the mempool or blockchain, that element
     /// will have a std::nullopt.
     ///
-    /// May throw DatabaseError (unlikely) or some other Exception subclass.  Note that txHashes should contain 0 or
+    /// May throw DatabaseError (unlikely) or some other Exception subclass.  Note that txIds should contain 0 or
     /// more 32-byte hashes in big-endian (JSON) memory order, otherwise this may throw if the hashes are of the wrong
     /// length.
-    TxHeightsResult getTxHeights(const std::vector<TxHash> &txHashes) const;
+    TxHeightsResult getTxHeights(const std::vector<TxId> &txIds) const;
     /// Convenience function. Same as above but optimized to query a single txhash.
-    std::optional<BlockHeight> getTxHeight(const TxHash &) const;
+    std::optional<BlockHeight> getTxHeight(const TxId &) const;
 
     // --- DUMP methods --- (used for debugging, largely)
 
@@ -383,7 +383,7 @@ private:
     void loadCheckUTXOsInDB(); ///< may throw -- called from startup()
     void loadCheckShunspentInDB(); ///< may throw -- called from startup()
     void loadCheckTxNumsFileAndBlkInfo(); ///< may throw -- called from startup()
-    void loadCheckTxHash2TxNumMgr(); ///< may throw -- called from startup()
+    void loadCheckTxId2TxNumMgr(); ///< may throw -- called from startup()
     void loadCheckEarliestUndo(); ///< may throw -- called from startup()
 
     std::optional<Header> headerForHeight_nolock(BlockHeight height, QString *errMsg = nullptr) const;
@@ -416,9 +416,9 @@ RecordFile: "headers"
   Data layout:  Each header is 80 bytes and they are laid out 1 after the other in what is conceptually a huge
   file-backed array. See RecordFile.cpp for how this file format works.
 
-RecordFile: "txnum2txhash"
+RecordFile: "txnum2txid"
   Purpose:  Mapping of TxNum -> TxId(hash)
-  Data layout: Each TxHash is 32 bytes and the hashes are laid out one after another in what is conceptually a huge
+  Data layout: Each TxId is 32 bytes and the hashes are laid out one after another in what is conceptually a huge
   file-backed array. See RecordFile.cpp.
   Key: record number -> txid_raw_bytes  ; maps a "txnum" to its 32-byte txid. Each tx on the blockchain has a
   monotonically increasing txnum based on where it appeared on the blockchain. Block 0, tx 0 has "txnum" 0, up until
@@ -458,10 +458,22 @@ RocksDB: "scripthash_unspent"
   using this scheme. I tried a read-modify-write approach (keying off just HashX) and it was painfully slow on synch.
   This is much faster to synch.
 
-RocksDB: "txhash2txnum"
+RocksDB: "txid2txnum"
   Key: The last 6 bytes of the txhash in question (txhash bytes being in big endian byte order, i.e. JSON byte order).
   Value: One or more serialized VarInts. Each VarInt represents a "TxNum" (which tells us where the actual hash lives
-    in the txnum2txhash flat file).
+    in the txnum2txid flat file).
+  Comments: This table is basically a hash table of txhash -> txNum and it allows us to answer questions such as whether
+    a particular tx exists in the blockchain, and if so, which block it was confirmed in.  Used by some of the newer
+    RPCs. Note that to save space the keys of our hash table are just the last 6 bytes of the txhash, which is fine
+    since collisions will be relatively rare for quite some time in the future. If there is a collision then simply
+    there will be more than 1 VarInt(TxNum) in that particular bucket, and we have to check each txNum in the bucket
+    for that key in series versus the txnum flat-file.  The performance penalty for this is extremely small since the
+    txnum flat-file is extremely fast to query given a txNum.
+
+RocksDB: "txcommitments2txnum"
+  Key: The last 6 bytes of the txhash in question (txhash bytes being in big endian byte order, i.e. JSON byte order).
+  Value: One or more serialized VarInts. Each VarInt represents a "TxNum" (which tells us where the actual hash lives
+    in the txnum2txid flat file).
   Comments: This table is basically a hash table of txhash -> txNum and it allows us to answer questions such as whether
     a particular tx exists in the blockchain, and if so, which block it was confirmed in.  Used by some of the newer
     RPCs. Note that to save space the keys of our hash table are just the last 6 bytes of the txhash, which is fine

@@ -1240,11 +1240,11 @@ void App::parseArgs()
     if (conf.hasValue("txhash_cache")) {
         bool ok{};
         // NB: units in conf file are in MB (1e6), but we store them in bytes internally.
-        const unsigned val = unsigned(conf.doubleValue("txhash_cache", Options::defaultTxHashCacheBytes / 1e6, &ok) * 1e6);
-        if (!ok || !options->isTxHashCacheBytesInRange(val))
+        const unsigned val = unsigned(conf.doubleValue("txhash_cache", Options::defaultTxIdCacheBytes / 1e6, &ok) * 1e6);
+        if (!ok || !options->isTxIdCacheBytesInRange(val))
             throw BadArgs(QString("txhash_cache: please specify a value in the range [%1, %2]")
-                          .arg(options->txHashCacheBytesMin/1e6).arg(options->txHashCacheBytesMax/1e6));
-        options->txHashCacheBytes = val;
+                          .arg(options->txIdCacheBytesMin/1e6).arg(options->txIdCacheBytesMax/1e6));
+        options->txIdCacheBytes = val;
         Util::AsyncOnObject(this, [val=val/1e6]{ DebugM("config: txhash_cache = ", val); });
     }
 

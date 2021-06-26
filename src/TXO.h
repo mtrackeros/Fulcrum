@@ -33,16 +33,16 @@
 #include <optional>
 #include <tuple> // for std::tie
 
-/// A transaction output; A txHash:outN pair.
+/// A transaction output; A txId:outN pair.
 struct TXO {
-    TxHash txHash;
+    TxId txId;
     IONum  outN = 0;
 
-    bool isValid() const { return txHash.length() == HashLen;  }
+    bool isValid() const { return txId.length() == HashLen;  }
     QString toString() const;
 
-    bool operator==(const TXO &o) const noexcept { return std::tie(outN, txHash) == std::tie(o.outN, o.txHash); /* cheaper to compare the outNs first */ }
-    bool operator<(const TXO &o) const noexcept { return std::tie(txHash, outN) < std::tie(o.txHash, o.outN); }
+    bool operator==(const TXO &o) const noexcept { return std::tie(outN, txId) == std::tie(o.outN, o.txId); /* cheaper to compare the outNs first */ }
+    bool operator<(const TXO &o) const noexcept { return std::tie(txId, outN) < std::tie(o.txId, o.outN); }
 
 
     // Serialization. Note that the resulting buffer may be 34 or 35 bytes, depending on whether IONum's value > 65535.
@@ -50,7 +50,7 @@ struct TXO {
     QByteArray toBytes(bool wide) const {
         QByteArray ret(int(serializedSize(wide)), Qt::Uninitialized);
         if (UNLIKELY(!isValid())) { ret.clear(); return ret; }
-        std::memcpy(ret.data(), txHash.constData(), HashLen);
+        std::memcpy(ret.data(), txId.constData(), HashLen);
         std::byte * const buf = reinterpret_cast<std::byte *>(ret.data() + HashLen);
         buf[0] = std::byte(outN >> 0u & 0xff);
         buf[1] = std::byte(outN >> 8u & 0xff);
@@ -72,7 +72,7 @@ struct TXO {
         static_assert (maxSize() - minSize() == 1, "Assumption here is that maxSize() and minSize() differ by 1");
         if (baLen != minSize() && baLen != maxSize())
             return ret;
-        ret.txHash = QByteArray(ba.constData(), HashLen);
+        ret.txId = QByteArray(ba.constData(), HashLen);
         const std::byte * const buf = reinterpret_cast<const std::byte *>(ba.constData() + HashLen);
         ret.outN = IONum(buf[0]) << 0u | IONum(buf[1]) << 8u;
         if (baLen == maxSize())  // 3-byte IONum (for values beyond 65535)
@@ -88,7 +88,7 @@ private:
 /// specialization of std::hash to be able to add struct TXO to any unordered_set or unordered_map as a key
 template<> struct std::hash<TXO> {
     std::size_t operator()(const TXO &txo) const noexcept {
-        const auto val1 = BTC::QByteArrayHashHasher{}(txo.txHash);
+        const auto val1 = BTC::QByteArrayHashHasher{}(txo.txId);
         const auto val2 = txo.outN;
         // We must copy the hash bytes and the ionum to a temporary buffer and hash that.
         // Previously, we put these two items in a struct but it didn't have a unique
@@ -107,7 +107,7 @@ struct TXOInfo {
     bitcoin::Amount amount;
     HashX hashX; ///< the scripthash this output is sent to.  Note in most cases this can be compactified to be a shallow-copy of existing data (such that dupes point to the same underlying data in eg UTXOSet).
     std::optional<unsigned> confirmedHeight; ///< if unset, is mempool tx
-    TxNum txNum = 0; ///< the globally mapped txNum (one for each TxHash). This is used to be able to delete the CompactTXO from the hashX's scripthash_unspent table
+    TxNum txNum = 0; ///< the globally mapped txNum (one for each TxId). This is used to be able to delete the CompactTXO from the hashX's scripthash_unspent table
 
     bool isValid() const { return amount / bitcoin::Amount::satoshi() >= 0 && hashX.length() == HashLen; }
 

@@ -32,7 +32,7 @@
 #include <unordered_map>
 #include <vector>
 
-/// We wrap QByteArray with this type for type safety; so as to not confuse TxHash with DspHash
+/// We wrap QByteArray with this type for type safety; so as to not confuse TxId with DspHash
 struct DspHash {
     QByteArray bytes; ///< In big-endian memory order (for Json). Should always have .size() == HashLen, otherwise is not considered valid.
 
@@ -56,22 +56,22 @@ struct DspHash {
 struct DSProof {
     DspHash hash; ///< big endian memory order (ready for Json)
     QByteArray serializedProof; ///< raw proof bytes (as retrieved from bitcoind getdsproof RPC)
-    TXO txo; ///< the coin that was double-spent (spent in txHash)
+    TXO txo; ///< the coin that was double-spent (spent in txId)
 
-    TxHash txHash; ///< the tx that this proof goes with (big endian memory order, ready for Json)
+    TxId txId; ///< the tx that this proof goes with (big endian memory order, ready for Json)
 
-    using TxHashSet = std::unordered_set<TxHash, HashHasher>;
-    TxHashSet descendants; ///< all tx's affected by this dsproof (includes txHash)
+    using TxIdSet = std::unordered_set<TxId, HashHasher>;
+    TxIdSet descendants; ///< all tx's affected by this dsproof (includes txId)
 
     DSProof() = default;
     bool operator==(const DSProof &o) const {
-        return     std::tie(  hash,   serializedProof,   txo,   txHash,   descendants)
-                == std::tie(o.hash, o.serializedProof, o.txo, o.txHash, o.descendants);
+        return     std::tie(  hash,   serializedProof,   txo,   txId,   descendants)
+                == std::tie(o.hash, o.serializedProof, o.txo, o.txId, o.descendants);
     }
     bool operator!=(const DSProof &o) const { return !(*this == o); }
 
     bool isComplete() const {
-        return hash.isValid() && txo.isValid() && !serializedProof.isEmpty() && !descendants.empty() && txHash.length() == HashLen;
+        return hash.isValid() && txo.isValid() && !serializedProof.isEmpty() && !descendants.empty() && txId.length() == HashLen;
     }
 
     bool isEmpty() const; ///< true iff *this is equivalent to a default constructed value
@@ -84,7 +84,7 @@ struct DSProof {
 struct DSPs {
     using DspHashSet = std::unordered_set<DspHash, DspHash::Hasher>;
     using DspMap = std::unordered_map<DspHash, DSProof, DspHash::Hasher>;
-    using TxDspsMap = std::unordered_map<TxHash, DspHashSet, HashHasher>;
+    using TxDspsMap = std::unordered_map<TxId, DspHashSet, HashHasher>;
 
 private:
     TxDspsMap txDspsMap; ///< set of dsproofs that affect a particular tx (we call it "linked" below)
@@ -103,50 +103,50 @@ public:
     void shrink_to_fit(); ///< reclaim memory (causes a rehash, invalidates iterators, pointers, etc)
     float load_factor() const { return (txDspsMap.load_factor() + dsproofs.load_factor()) / 2.f; }
 
-    /// @returns the total number of TxHash <-> DSProof "links" or associations in this data-structure.
+    /// @returns the total number of TxId <-> DSProof "links" or associations in this data-structure.
     std::size_t numTxDspLinks() const;
 
     bool operator==(const DSPs &o) const { return std::tie(txDspsMap, dsproofs) == std::tie(o.txDspsMap, o.dsproofs); }
     bool operator!=(const DSPs &o) const { return !(*this == o); }
 
     /// Adds a dsp by move construction. All of the descendants in its descendant set are also added to the txDspsMap.
-    /// The dsp is expected to be valid, have a dspHash, a txHash, and a valid descendants set.
+    /// The dsp is expected to be valid, have a dspHash, a txId, and a valid descendants set.
     /// @returns true on success. Note that if the object already exists this does nothing and will return false.
-    /// @exceptions BadArgs if the supplied dsp argument is bad/invalid/missing txHash/missing descendants.
+    /// @exceptions BadArgs if the supplied dsp argument is bad/invalid/missing txId/missing descendants.
     bool add(DSProof && dsp);
     /// @returns a valid pointer to a dsp in `dsproofs` on success, nullptr if hash is not found.
     const DSProof * get(const DspHash &hash) const;
     /// Removes a dsp. Unlinks all the tx's linked to it.
     /// @returns the number of tx's that were previously linked with this dsp.
     std::size_t rm(const DspHash &hash);
-    /// Links a txHash to an existing dspHash. Updates its DSProof::descendants set to include txHash.
-    /// @returns false if dspHash does not exist, of if txHash is not 32 bytes, or if the txHash was already linked to
+    /// Links a txId to an existing dspHash. Updates its DSProof::descendants set to include txId.
+    /// @returns false if dspHash does not exist, of if txId is not 32 bytes, or if the txId was already linked to
     ///     dspHash; true otherwise.
-    bool addTx(const DspHash &dspHash, const TxHash &txHash);
-    /// Unlinks a tx from all its dsps. If txHash is the actual double-spend tx for any dsps, and not a descendant,
+    bool addTx(const DspHash &dspHash, const TxId &txId);
+    /// Unlinks a tx from all its dsps. If txId is the actual double-spend tx for any dsps, and not a descendant,
     /// all such dsps will be removed as well.
     /// @returns The number of dsps that were associated with this tx, or 0 if not found.
-    std::size_t rmTx(const TxHash &txHash);
+    std::size_t rmTx(const TxId &txId);
 
-    /// @returns a pointer to the internal set of all of the DspHashes linked to a TxHash, or nullptr if txHash has
+    /// @returns a pointer to the internal set of all of the DspHashes linked to a TxId, or nullptr if txId has
     /// no associated dsps. The complexity of this call is constant-time.
-    const DspHashSet * dspHashesForTx(const TxHash &txHash) const;
+    const DspHashSet * dspHashesForTx(const TxId &txId) const;
 
-    /// @returns a vector of pointers to all the actual proofs linked with a txHash, or an empty vector if none were found.
-    std::vector<const DSProof *> proofsLinkedToTx(const TxHash &txHash) const;
+    /// @returns a vector of pointers to all the actual proofs linked with a txId, or an empty vector if none were found.
+    std::vector<const DSProof *> proofsLinkedToTx(const TxId &txId) const;
 
-    /// @returns A set containing all the txids that are linked to all the txids in txHashes via common dsproofs. That
-    /// is, for each txHash in `txHashes`, all of its linked proofs are examined and all of the descendants in each
-    /// proof are added to the returned TxHashSet. This is used by Mempool.cpp.
-    DSProof::TxHashSet txsLinkedToTxs(const DSProof::TxHashSet &txHashes) const;
+    /// @returns A set containing all the txids that are linked to all the txids in txIds via common dsproofs. That
+    /// is, for each txId in `txIds`, all of its linked proofs are examined and all of the descendants in each
+    /// proof are added to the returned TxIdSet. This is used by Mempool.cpp.
+    DSProof::TxIdSet txsLinkedToTxs(const DSProof::TxIdSet &txIds) const;
 
-    /// @returns a pointer to the primary proof associated with a txHash, or the "best" proof if there is no primary.
+    /// @returns a pointer to the primary proof associated with a txId, or the "best" proof if there is no primary.
     ///     A primary proof is a proof for the tx itself, rather than one of its ancestors. A "best" proof is one that
-    ///     has the smallest descendants set containing txHash (and thus is likely "closest" in terms of ancestry to
-    ///     txHash). If txHash has no proofs, nullptr is returned.
+    ///     has the smallest descendants set containing txId (and thus is likely "closest" in terms of ancestry to
+    ///     txId). If txId has no proofs, nullptr is returned.
     ///
     ///     About primary proofs: Note that currently in BCHN, a tx may only have one and only 1 primary proof. However
     ///     nothing in these data structures enforces that. If a tx has more than one primary proof, only the first one
     ///     encountered in the internal set is returned.
-    const DSProof * bestProofForTx(const TxHash &txHash) const;
+    const DSProof * bestProofForTx(const TxId &txId) const;
 };

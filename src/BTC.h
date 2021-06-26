@@ -101,7 +101,7 @@ namespace BTC
     struct is_block_or_tx {
         using BO = std::decay_t<BitcoinObject>;
         static constexpr bool value = std::is_base_of_v<bitcoin::CBlock, BO> || std::is_same_v<bitcoin::CTransaction, BO>
-                                        || std::is_same_v<bitcoin::CMutableTransaction, BO>;
+                                        || std::is_same_v<bitcoin::CMutableTransaction, BO> ||  std::is_same_v<bitcoin::CBlockHeader, BO>;
     };
 
     template <typename BitcoinObject>
@@ -125,7 +125,7 @@ namespace BTC
     }
 
     /// Helper -- returns the size of a block header. Should always be 80. Update this if that changes.
-    constexpr int GetBlockHeaderSize() noexcept { return 80; }
+    constexpr int GetBlockHeaderSize() noexcept { return 160; }
 
     /// Returns the sha256 double hash (not reveresed -- little endian) of the input QByteArray. The results are copied
     /// once from the hasher into the returned QByteArray.  This is faster than obtaining a uint256 from bitcoin::Hash
@@ -165,7 +165,7 @@ namespace BTC
     /// hashPrevBlock of the current header matches the computed hash of the last header.
     /// If that is ever not the case, operator() returns false. Returns true otherwise.
     class HeaderVerifier {
-        QByteArray prev; // 80 byte header data or empty
+        bitcoin::CBlockHeader prev; // header data or empty
         long prevHeight = -1;
 
         bool checkInner(long height, const bitcoin::CBlockHeader &, QString *err);
@@ -177,10 +177,16 @@ namespace BTC
         bool operator()(const QByteArray & header, QString *err = nullptr);
         bool operator()(const bitcoin::CBlockHeader & header, QString *err = nullptr);
         /// returns the height, 80 byte header of the last header seen. If no headers seen, returns (-1, Empty QByteArray)
-        std::pair<int, QByteArray> lastHeaderProcessed() const;
+        std::pair<int, bitcoin::CBlockHeader> lastHeaderProcessed() const;
 
-        bool isValid() const { return prev.length() == GetBlockHeaderSize(); }
-        void reset(unsigned nextHeight = 0, QByteArray prevHeader = QByteArray()) { prevHeight = long(nextHeight)-1; prev = prevHeader; }
+        void reset(unsigned nextHeight = 0, bitcoin::CBlockHeader prevHeader = bitcoin::CBlockHeader()) {
+            prevHeight = long(nextHeight)-1;
+            prev = prevHeader;
+        }
+        void reset(unsigned nextHeight = 0, QByteArray prevHeader = QByteArray()) {
+            prevHeight = long(nextHeight)-1;
+            prev = Deserialize<bitcoin::CBlockHeader>(prevHeader);
+        }
     };
 
     /// Trivial hasher for sha256, rmd160, etc hashed byte arrays (for use with std::unordered_map,

@@ -115,7 +115,7 @@ void SynchDSPsTask::dlNext(bool phase2, std::shared_ptr<DSPs::DspMap::node_type>
             if (!phase2) {
                 // keys we are reading: "hex", "txid"
                 const QByteArray &serdata = proof.serializedProof = Util::ParseHexFast(vm.value("hex").toString().toUtf8());
-                const TxHash &txid = proof.txHash = Util::ParseHexFast(vm.value("txid").toString().toUtf8());
+                const TxId &txid = proof.txId = Util::ParseHexFast(vm.value("txid").toString().toUtf8());
                 const DspHash chk = DspHash::fromSerializedProof(serdata);
                 if (chk != hash || !chk.isValid() || txid.length() != HashLen)
                     throw Exception("basic phase 1 sanity checks failed");
@@ -124,17 +124,17 @@ void SynchDSPsTask::dlNext(bool phase2, std::shared_ptr<DSPs::DspMap::node_type>
             } else {
                 // phase 2: keys we are reading: "dspid", "txid", "outpoint", "descendants"
                 const DspHash chk = DspHash::fromHex(vm.value("dspid").toString());
-                const TxHash txidChk = Util::ParseHexFast(vm.value("txid").toString().toUtf8());
+                const TxId txidChk = Util::ParseHexFast(vm.value("txid").toString().toUtf8());
                 const auto op = vm.value("outpoint").toMap();
-                proof.txo.txHash = Util::ParseHexFast(op.value("txid").toString().toUtf8());
+                proof.txo.txId = Util::ParseHexFast(op.value("txid").toString().toUtf8());
                 bool ok{};
                 proof.txo.outN = op.value("vout").toUInt(&ok);;
                 const auto descs = vm.value("descendants").toStringList();
-                if (!ok || chk != hash || txidChk != proof.txHash || proof.txo.txHash.length() != HashLen || descs.isEmpty())
-                    throw Exception(QString("basic phase 2 sanity checks failed: ok: %1, chk: %2, hash: %3, proofTxHash: %4, "
-                                            "txidChk: %5, txoTxHash: %6, descs: %7")
-                                    .arg(int(ok)).arg(QString(chk.toHex())).arg(QString(hash.toHex())).arg(QString(proof.txHash.toHex()))
-                                    .arg(QString(txidChk.toHex())).arg(QString(proof.txo.txHash.toHex())).arg(descs.size()));
+                if (!ok || chk != hash || txidChk != proof.txId || proof.txo.txId.length() != HashLen || descs.isEmpty())
+                    throw Exception(QString("basic phase 2 sanity checks failed: ok: %1, chk: %2, hash: %3, proofTxId: %4, "
+                                            "txidChk: %5, txoTxId: %6, descs: %7")
+                                    .arg(int(ok)).arg(QString(chk.toHex())).arg(QString(hash.toHex())).arg(QString(proof.txId.toHex()))
+                                    .arg(QString(txidChk.toHex())).arg(QString(proof.txo.txId.toHex())).arg(descs.size()));
                 // build descendants set
                 for (const auto &desc : descs) {
                     const auto txid = Util::ParseHexFast(desc.toUtf8());
@@ -142,8 +142,8 @@ void SynchDSPsTask::dlNext(bool phase2, std::shared_ptr<DSPs::DspMap::node_type>
                         throw Exception(QString("bad txid \"%1\" in descendants set").arg(desc));
                     proof.descendants.insert(txid);
                 }
-                if (!proof.descendants.count(proof.txHash))
-                    throw Exception(QString("missing proof's associated txid \"%1\" in the descendants set").arg(QString(proof.txHash.toHex())));
+                if (!proof.descendants.count(proof.txId))
+                    throw Exception(QString("missing proof's associated txid \"%1\" in the descendants set").arg(QString(proof.txId.toHex())));
                 DebugM("dsp ", hash.toHex(), " downloaded ok, descendants: ", proof.descendants.size());
                 dspsDownloaded.insert(std::move(*node)); // success! phase2 complete...
                 AGAIN();
@@ -183,9 +183,9 @@ void SynchDSPsTask::doProcessDownloads()
     {
         auto [mempool, lock] = storage->mutableMempool();
         for (auto & [hash, proof] : dspsDownloaded) {
-            if (!mempool.txs.count(proof.txHash)) {
+            if (!mempool.txs.count(proof.txId)) {
                 // unknown txid (it's new and we haven't seen it in SynchMempoolTask yet!)
-                DebugM("skipping dsp ", hash.toHex(), " because its associated txid ", proof.txHash.toHex(),
+                DebugM("skipping dsp ", hash.toHex(), " because its associated txid ", proof.txId.toHex(),
                        " is not yet known to us");
                 ++notAdded;
                 continue;
