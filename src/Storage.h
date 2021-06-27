@@ -205,6 +205,7 @@ public:
     ///
     /// Thread safe, takes class-level locks.
     std::vector<TxId> txIdsForBlockInBitcoindMemoryOrder(BlockHeight height) const;
+    std::vector<TxId> txCommitmentsForBlockInBitcoindMemoryOrder(BlockHeight height) const;
 
     /// Returns the known size of the utxo set (for now this is a signed value -- to debug underflow errors)
     int64_t utxoSetSize() const;

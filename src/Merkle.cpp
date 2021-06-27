@@ -26,6 +26,7 @@ namespace Merkle {
 
     BranchAndRootPair branchAndRoot(const HashVec &hashVec, unsigned index, const std::optional<unsigned> & optLen)
     {
+        const Hash nullhash = BTC::Hash2ByteArray(bitcoin::uint256());
         BranchAndRootPair ret;
         const unsigned hvsz = unsigned(hashVec.size());
         if (!hvsz || index >= hvsz) {
@@ -58,7 +59,7 @@ namespace Merkle {
 
         for (unsigned i = 0; i < length; ++i) {
             if (hashes.size() & 0x1) // is odd, add the end twice
-                hashes.emplace_back(hashes.back());
+                hashes.emplace_back(nullhash);
 
             branch.push_back(hashes[index ^ 1]);
             index >>= 1;

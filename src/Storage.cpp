@@ -956,7 +956,8 @@ struct Storage::Pvt
 {
     Pvt(const unsigned cacheSizeBytes)
         : lruNum2Hash(std::max(unsigned(cacheSizeBytes*kLruNum2HashCacheMemoryWeight), 1u)),
-          lruHeight2Hashes_BitcoindMemOrder(std::max(unsigned(cacheSizeBytes*kLruHeight2HashesCacheMemoryWeight), 1u))
+          lruHeight2Hashes_BitcoindMemOrder(std::max(unsigned(cacheSizeBytes*kLruHeight2HashesCacheMemoryWeight), 1u)),
+          lruHeight2Commitments_BitcoindMemOrder(std::max(unsigned(cacheSizeBytes*kLruHeight2CommitmentsCacheMemoryWeight), 1u))
     {}
 
     Pvt(const Pvt &) = delete;
@@ -992,6 +993,7 @@ struct Storage::Pvt
     RocksDBs db;
 
     std::unique_ptr<RecordFile> txNumsFile;
+    std::unique_ptr<RecordFile> txCommitmentsFile;
     std::unique_ptr<RecordFile> headersFile;
 
     /// Big lock used for block/history updates. Public methods that read the history such as getHistory and listUnspent
@@ -1017,8 +1019,9 @@ struct Storage::Pvt
     std::atomic<uint32_t> earliestUndoHeight = InvalidUndoHeight; ///< the purpose of this is to control when we issue "delete" commands to the db for deleting expired undo infos from the undo db
 
     // Ratios of cacheMemoryBytes that we give to each of the 2 lru caches -- we do 50/50
-    static constexpr double kLruNum2HashCacheMemoryWeight = 0.50;
-    static constexpr double kLruHeight2HashesCacheMemoryWeight = 1.0 - kLruNum2HashCacheMemoryWeight;
+    static constexpr double kLruNum2HashCacheMemoryWeight = 1.0/3.0;
+    static constexpr double kLruHeight2HashesCacheMemoryWeight = 1.0/3.0;
+    static constexpr double kLruHeight2CommitmentsCacheMemoryWeight = 1.0/3.0;
 
     /// This cache is anticipated to see heavy use for get_history, so is configurable (config option: txhash_cache)
     /// This gets cleared by undoLatestBlock.
@@ -1032,6 +1035,8 @@ struct Storage::Pvt
     /// Cache BlockHeight -> vector of txIds for the block (in bitcoind memory order -- little endian).
     /// This is used by the txIdsForBlock function only (which is used by get_merkle and id_from_pos in the RPC protocol).
     CostCache<BlockHeight, QVector<TxId>> lruHeight2Hashes_BitcoindMemOrder; // NOTE: max size in bytes initted in constructor
+    CostCache<BlockHeight, QVector<TxId>> lruHeight2Commitments_BitcoindMemOrder; // NOTE: max size in bytes initted in constructor
+
     /// returns the cost for a particular cache item based on the number of hashes in the vector
     static constexpr unsigned lruHeight2HashSizeCalc(size_t nHashes) {
         // each cache item with nHashes takes roughly this much memory
@@ -1039,9 +1044,17 @@ struct Storage::Pvt
                          + decltype(lruHeight2Hashes_BitcoindMemOrder)::itemOverheadBytes() );
     }
 
+    /// returns the cost for a particular cache item based on the number of hashes in the vector
+    static constexpr unsigned lruHeight2CommitmentsSizeCalc(size_t nHashes) {
+        // each cache item with nHashes takes roughly this much memory
+        return unsigned( (nHashes * ((HashLen+1) + sizeof(TxId) + Util::qByteArrayPvtDataSize()))
+                         + decltype(lruHeight2Commitments_BitcoindMemOrder)::itemOverheadBytes() );
+    }
+
+
     struct LRUCacheStats {
         std::atomic_size_t num2HashHits = 0, num2HashMisses = 0,
-                           height2HashesHits = 0, height2HashesMisses = 0;
+                           height2HashesHits = 0, height2HashesMisses = 0, height2CommitmentsHits = 0, height2CommitmentsMisses = 0;
     } lruCacheStats;
 
     /// this object is thread safe, but it needs to be initialized with headers before allowing client connections.
@@ -1665,7 +1678,9 @@ void Storage::loadCheckTxNumsFileAndBlkInfo()
 {
     // may throw.
     p->txNumsFile = std::make_unique<RecordFile>(options->datadir + QDir::separator() + "txnum2txid", HashLen, 0x000012e2);
+    p->txCommitmentsFile = std::make_unique<RecordFile>(options->datadir + QDir::separator() + "txnum2txcommitment", HashLen, 0x000012e2);
     p->txNumNext = p->txNumsFile->numRecords();
+    FatalAssert(p->txNumsFile->numRecords() == p->txCommitmentsFile->numRecords(), __func__, ": TxCommitments file invalid number of records");
     Debug() << "Read TxNumNext from file: " << p->txNumNext.load();
     TxNum ct = 0;
     if (const int height = latestTip().first; height >= 0)
@@ -2260,6 +2275,21 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
                 QString errStr;
                 for (const auto & txInfo : ppb->txInfos) {
                     if (!batch.append(txInfo.id, &errStr)) // does not throw here, but we do.
+                        throw InternalError(QString("Batch append for txNums failed: %1.").arg(errStr));
+                }
+                // <-- The batch d'tor may close the app on error here with Fatal() if a low-level file error occurs now
+                //     on header update (see: RecordFile.cpp, ~BatchAppendContext()).
+            }
+
+            {  // add txnum -> txhash association to the TxNumsFile...
+                auto batch = p->txCommitmentsFile->beginBatchAppend(); // may throw if io error in c'tor here.
+                QString errStr;
+                for (const auto & txInfo : ppb->txInfos) {
+                    QByteArray txCommitment;
+                    txCommitment.append(txInfo.id);
+                    txCommitment.append(txInfo.hash);
+                    const auto txCommitmentHash = BTC::Hash(txCommitment);
+                    if (!batch.append(txCommitmentHash, &errStr)) // does not throw here, but we do.
                         throw InternalError(QString("Batch append for txNums failed: %1.").arg(errStr));
                 }
                 // <-- The batch d'tor may close the app on error here with Fatal() if a low-level file error occurs now
@@ -2861,6 +2891,56 @@ std::vector<TxId> Storage::txIdsForBlockInBitcoindMemoryOrder(BlockHeight height
     }
     return ret;
 }
+
+// NOTE: the returned vector has hashes in bitcoind memory order (little endian -- unlike every other function in this file!)
+std::vector<TxId> Storage::txCommitmentsForBlockInBitcoindMemoryOrder(BlockHeight height) const
+{
+    std::vector<TxId> ret;
+    std::pair<TxNum, size_t> startCount{0,0};
+    SharedLockGuard(p->blocksLock); // guarantee a consistent view (so that data doesn't mutate from underneath us)
+    {
+        // check cache
+        auto opt = p->lruHeight2Commitments_BitcoindMemOrder.object(height);
+        if (opt.has_value()) {
+            // cache hit! return the cached item
+            auto & vec = *opt;
+            // convert from QVector to std::vector -- TODO: see if we can make the whole call path use QVector to avoid
+            // these copies.
+            ret.reserve(size_t(vec.size()));
+            ret.insert(ret.end(), vec.begin(), vec.end()); // We do it this way because QVector::toStdVector() doesn't reserve() first :/
+            ++p->lruCacheStats.height2CommitmentsHits;
+            return ret;
+        }
+    }
+    ++p->lruCacheStats.height2CommitmentsMisses;
+    {
+        SharedLockGuard g(p->blkInfoLock);
+        if (height >= p->blkInfos.size())
+            return ret;
+        const BlkInfo & bi = p->blkInfos[height];
+        startCount = { bi.txNum0, bi.nTx };
+    }
+    QString err;
+    auto vec = p->txCommitmentsFile->readRecords(startCount.first, startCount.second, &err);
+    if (vec.size() != startCount.second || !err.isEmpty()) {
+        Warning() << "Failed to read " << startCount.second << " txNums for height " << height << ". " << err;
+        return ret;
+    }
+    Util::reverseEachItem(vec); // reverse each hash to make them all be in bitcoind memory order.
+    ret.swap(vec);
+    {
+        // put result in cache
+        p->lruHeight2Commitments_BitcoindMemOrder.insert(height,
+#if QT_VERSION < QT_VERSION_CHECK(5, 14, 0)
+                                                    QVector<TxId>::fromStdVector(ret),
+#else
+                                                    Util::toVec<QVector<TxId>>(ret),
+#endif
+                                                    p->lruHeight2CommitmentsSizeCalc(ret.size()));
+    }
+    return ret;
+}
+
 
 auto Storage::getHistory(const HashX & hashX, bool conf, bool unconf) const -> History
 {

@@ -151,6 +151,12 @@ namespace BTC
         return ret;
     };
 
+    template <class BitcoinHashT>
+    QByteArray Hash2ByteArray(const BitcoinHashT &hash) {
+        QByteArray ret(reinterpret_cast<const char *>(hash.begin()), hash.width()); // deep copy
+        return ret;
+    };
+
     /// returns true iff cscript is OP_RETURN, false otherwise
     inline bool IsOpReturn(const bitcoin::CScript &cs) {
         return cs.size() > 0 && *cs.begin() == bitcoin::opcodetype::OP_RETURN;

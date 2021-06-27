@@ -1714,11 +1714,11 @@ namespace {
     /// Input txIds should be in bitcoind memory order.
     /// Output is a QVariantList already reversed and hex encoded, suitable for putting into the results map as 'merkle'.
     /// Used by the below two _id_from_pos and _get_merkle rpc methods.
-    QVariantList getMerkleForTxIds(const std::vector<QByteArray> & txIds, unsigned pos) {
+    QVariantList getMerkleForTxCommitments(const std::vector<QByteArray> & txCommitments, unsigned pos) {
         QVariantList branchList;
 
         // next, compute the branch and root for the tx hashes which are now in bitcoind memory order
-        auto pair = Merkle::branchAndRoot(txIds, pos);
+        auto pair = Merkle::branchAndRoot(txCommitments, pos);
         auto & [branch, root] = pair;
 
         // now, build our results for json as a QVariantList, reversing the memory back to hex memory order, and hex encoding it.
@@ -1778,7 +1778,7 @@ void Server::rpc_blockchain_transaction_get_merkle(Client *c, const RPC::Message
         if (pos == NO_POS)
             throw RPCError(QString("No transaction matching the requested hash found at height %1").arg(height));
 
-        const auto branchList = getMerkleForTxIds(txIds, pos);
+        const auto branchList = getMerkleForTxCommitments(txIds, pos);
 
         QVariantMap resp = {
             { "block_height" , height },
@@ -1824,7 +1824,8 @@ void Server::rpc_blockchain_transaction_id_from_pos(Client *c, const RPC::Messag
             // (we need to reverse it for outputting to hex since we received it in bitcoind internal memory order).
             const QByteArray txIdHex = Util::ToHexFast(Util::reversedCopy(txIds[pos]));
 
-            const auto branchList = getMerkleForTxIds(txIds, pos);
+            auto txCommitments = storage->txCommitmentsForBlockInBitcoindMemoryOrder(height);
+            const auto branchList = getMerkleForTxCommitments(txCommitments, pos);
 
             QVariantMap res = {
                 { "tx_hash" , txIdHex },
