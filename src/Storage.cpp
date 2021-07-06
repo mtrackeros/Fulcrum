@@ -2480,7 +2480,7 @@ void Storage::addBlock(PreProcessedBlockPtr ppb, bool saveUndo, unsigned nReserv
             // save the last of the undo info, if in saveUndo mode
             if (undo) {
                 const auto t0 = Util::getTimeNS();
-                undo->hash = BTC::HashRev(rawHeader);
+                undo->hash = BTC::Hash2ByteArrayRev(ppb->header.GetHash());
                 undo->scriptHashes = Util::keySet<decltype (undo->scriptHashes)>(ppb->hashXAggregated);
                 static const QString errPrefix("Error saving undo info to undo db");
 
